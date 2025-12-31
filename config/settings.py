@@ -113,6 +113,32 @@ class CodexConfig:
 
 
 @dataclass
+class QoderConfig:
+    binary: str = "qodercli"
+    extra_args: List[str] = field(default_factory=list)
+    default_model: Optional[str] = None
+
+    @classmethod
+    def from_env(cls) -> "QoderConfig":
+        binary = os.getenv("QODER_CLI_PATH", "qodercli")
+        if not shutil.which(binary):
+            raise ValueError(
+                f"Qoder CLI binary '{binary}' not found in PATH. "
+                "Set QODER_CLI_PATH or install Qoder CLI."
+            )
+
+        extra_args_env = os.getenv("QODER_EXTRA_ARGS", "").strip()
+        extra_args = shlex.split(extra_args_env) if extra_args_env else []
+        default_model = os.getenv("QODER_DEFAULT_MODEL")
+
+        return cls(
+            binary=binary,
+            extra_args=extra_args,
+            default_model=default_model,
+        )
+
+
+@dataclass
 class SlackConfig(BaseIMConfig):
     bot_token: str
     app_token: Optional[str] = None  # For Socket Mode
@@ -173,12 +199,51 @@ class SlackConfig(BaseIMConfig):
 
 
 @dataclass
+class DingtalkConfig(BaseIMConfig):
+    """DingTalk (钉钉) IM platform configuration"""
+    app_key: str
+    app_secret: str
+    target_conversation: Optional[Union[List[str], str]] = (
+        None  # Whitelist of conversation IDs. Empty list = specific only, null/None = accept all
+    )
+    require_mention: bool = False  # Require @mention in group chats (ignored in DMs)
+
+    @classmethod
+    def from_env(cls) -> "DingtalkConfig":
+        app_key = os.getenv("DINGTALK_APP_KEY")
+        if not app_key:
+            raise ValueError("DINGTALK_APP_KEY environment variable is required")
+
+        app_secret = os.getenv("DINGTALK_APP_SECRET")
+        if not app_secret:
+            raise ValueError("DINGTALK_APP_SECRET environment variable is required")
+
+        return cls(
+            app_key=app_key,
+            app_secret=app_secret,
+            target_conversation=SlackConfig._parse_channel_list(os.getenv("DINGTALK_TARGET_CONVERSATION")),
+            require_mention=os.getenv("DINGTALK_REQUIRE_MENTION", "false").lower() == "true",
+        )
+
+    def validate(self) -> bool:
+        """Validate DingTalk configuration"""
+        self.validate_required_string(self.app_key, "DINGTALK_APP_KEY")
+        self.validate_required_string(self.app_secret, "DINGTALK_APP_SECRET")
+        # DingTalk app_key is typically 64 characters
+        if len(self.app_key) != 64:
+            logger.warning("DingTalk app_key length might be invalid (expected 64 characters)")
+        return True
+
+
+@dataclass
 class AppConfig:
-    platform: str  # 'telegram' or 'slack'
+    platform: str  # 'telegram', 'slack', or 'dingtalk'
     telegram: Optional[TelegramConfig] = None
     slack: Optional[SlackConfig] = None
+    dingtalk: Optional[DingtalkConfig] = None
     claude: ClaudeConfig = None
     codex: Optional[CodexConfig] = None
+    qoder: Optional["QoderConfig"] = None
     log_level: str = "INFO"
     cleanup_enabled: bool = False
     agent_route_file: Optional[str] = None
@@ -190,9 +255,9 @@ class AppConfig:
             raise ValueError("IM_PLATFORM environment variable is required")
 
         platform = platform.lower()
-        if platform not in ["telegram", "slack"]:
+        if platform not in ["telegram", "slack", "dingtalk"]:
             raise ValueError(
-                f"Invalid IM_PLATFORM: {platform}. Must be 'telegram' or 'slack'"
+                f"Invalid IM_PLATFORM: {platform}. Must be 'telegram', 'slack', or 'dingtalk'"
             )
 
         log_level = os.getenv(
@@ -224,12 +289,27 @@ class AppConfig:
                 logger.warning(f"Codex support disabled: {exc}")
                 codex_config = None
 
+        qoder_config = None
+        qoder_enabled = os.getenv("QODER_ENABLED", "true").lower() in [
+            "1",
+            "true",
+            "yes",
+            "on",
+        ]
+        if qoder_enabled:
+            try:
+                qoder_config = QoderConfig.from_env()
+            except ValueError as exc:
+                logger.warning(f"Qoder support disabled: {exc}")
+                qoder_config = None
+
         config = cls(
             platform=platform,
             claude=ClaudeConfig.from_env(),
             log_level=log_level,
             cleanup_enabled=cleanup_enabled,
             codex=codex_config,
+            qoder=qoder_config,
             agent_route_file=agent_route_file,
         )
 
@@ -240,5 +320,8 @@ class AppConfig:
         elif platform == "slack":
             config.slack = SlackConfig.from_env()
             config.slack.validate()
+        elif platform == "dingtalk":
+            config.dingtalk = DingtalkConfig.from_env()
+            config.dingtalk.validate()
 
         return config

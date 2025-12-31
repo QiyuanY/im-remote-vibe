@@ -6,7 +6,7 @@ import logging
 from typing import Optional, Dict, Any
 from config.settings import AppConfig
 from modules.im import BaseIMClient, MessageContext, IMFactory
-from modules.im.formatters import TelegramFormatter, SlackFormatter
+from modules.im.formatters import TelegramFormatter, SlackFormatter, DingtalkFormatter
 from modules.agent_router import AgentRouter
 from modules.agents import AgentService, ClaudeAgent, CodexAgent
 from modules.claude_client import ClaudeClient
@@ -62,6 +62,8 @@ class Controller:
             formatter = TelegramFormatter()
         elif self.config.platform == "slack":
             formatter = SlackFormatter()
+        elif self.config.platform == "dingtalk":
+            formatter = DingtalkFormatter()
         else:
             logger.warning(
                 f"Unknown platform: {self.config.platform}, using Telegram formatter"
@@ -88,6 +90,12 @@ class Controller:
             if isinstance(self.im_client, SlackBot):
                 self.im_client.set_settings_manager(self.settings_manager)
                 logger.info("Injected settings_manager into SlackBot for thread tracking")
+        elif self.config.platform == "dingtalk":
+            # Import here to avoid circular dependency
+            from modules.im.dingtalk import DingtalkBot
+            if isinstance(self.im_client, DingtalkBot):
+                self.im_client.set_settings_manager(self.settings_manager)
+                logger.info("Injected settings_manager into DingtalkBot")
 
     def _init_handlers(self):
         """Initialize all handlers with controller reference"""
@@ -109,6 +117,12 @@ class Controller:
                 self.agent_service.register(CodexAgent(self, self.config.codex))
             except Exception as e:
                 logger.error(f"Failed to initialize Codex agent: {e}")
+        if self.config.qoder:
+            try:
+                from modules.agents.qoder_agent import QoderAgent
+                self.agent_service.register(QoderAgent(self, self.config.qoder))
+            except Exception as e:
+                logger.error(f"Failed to initialize Qoder agent: {e}")
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
@@ -167,6 +181,11 @@ class Controller:
             if context.channel_id != context.user_id:
                 return context.channel_id
             return context.user_id
+        elif self.config.platform == "dingtalk":
+            # For DingTalk groups, use channel_id; for DMs use user_id
+            if context.channel_id != context.user_id:
+                return context.channel_id
+            return context.user_id
         return context.user_id
 
     def _get_target_context(self, context: MessageContext) -> MessageContext:
@@ -220,6 +239,9 @@ class Controller:
                 settings_key = (
                     channel_id if channel_id else user_id
                 )  # fallback to user_id if no channel
+            elif self.config.platform == "dingtalk":
+                # For DingTalk, similar logic - prefer channel_id for groups
+                settings_key = channel_id if channel_id else user_id
             else:
                 settings_key = channel_id if channel_id else user_id
 
