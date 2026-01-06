@@ -24,6 +24,8 @@ class UserSettings:
     )
     # Slack active threads: {channel_id: {thread_ts: last_active_timestamp}}
     active_slack_threads: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # User's preferred agent (overrides platform/default routing)
+    preferred_agent: Optional[str] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization"""
@@ -409,3 +411,25 @@ class SettingsManager:
         channels_to_clean = list(settings.active_slack_threads.keys())
         for channel_id in channels_to_clean:
             self._cleanup_expired_threads_for_channel(user_id, channel_id)
+
+    # ---------------------------------------------
+    # Preferred agent management
+    # ---------------------------------------------
+    def set_preferred_agent(self, user_id: Union[int, str], agent_name: str):
+        """Set user's preferred agent"""
+        settings = self.get_user_settings(user_id)
+        settings.preferred_agent = agent_name
+        self.update_user_settings(user_id, settings)
+        logger.info(f"Set preferred agent for user {user_id} to {agent_name}")
+
+    def get_preferred_agent(self, user_id: Union[int, str]) -> Optional[str]:
+        """Get user's preferred agent"""
+        settings = self.get_user_settings(user_id)
+        return settings.preferred_agent
+
+    def clear_preferred_agent(self, user_id: Union[int, str]):
+        """Clear user's preferred agent (revert to default routing)"""
+        settings = self.get_user_settings(user_id)
+        settings.preferred_agent = None
+        self.update_user_settings(user_id, settings)
+        logger.info(f"Cleared preferred agent for user {user_id}")

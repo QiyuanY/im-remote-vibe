@@ -81,6 +81,7 @@ class CommandHandlers:
                 "",
                 formatter.format_bold("Commands:"),
                 formatter.format_text("/start - Show this message"),
+                formatter.format_text("/agent - Switch AI agent"),
                 formatter.format_text("/clear - Reset session and start fresh"),
                 formatter.format_text("/cwd - Show current working directory"),
                 formatter.format_text("/set_cwd <path> - Set working directory"),
@@ -97,6 +98,7 @@ class CommandHandlers:
                     "• Each chat maintains its own conversation context"
                 ),
                 formatter.format_text("• Use /clear to reset the conversation"),
+                formatter.format_text("• Use /agent to switch between AI agents"),
             ]
 
             message_text = formatter.format_message(*lines)
@@ -343,3 +345,92 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
                 context,  # Use original context
                 f"❌ Error sending stop command: {str(e)}",
             )
+
+    async def handle_agent(self, context: MessageContext, args: str = ""):
+        """Handle /agent command - switch between available AI agents"""
+        try:
+            args = args.strip().lower()
+            available_agents = list(self.controller.agent_service.agents.keys())
+
+            if not args:
+                # Show current agent and available list
+                current = self._get_current_agent(context)
+                agent_list = ", ".join(available_agents)
+                formatter = self.im_client.formatter
+
+                message = formatter.format_message(
+                    f"🤖 Current Agent: {formatter.format_bold(current)}",
+                    "",
+                    f"Available agents: {formatter.format_code_inline(agent_list)}",
+                    "",
+                    f"Usage: {formatter.format_code_inline('/agent <name>')}",
+                )
+                channel_context = self._get_channel_context(context)
+                await self.im_client.send_message(channel_context, message)
+                return
+
+            # Validate agent name
+            if args not in available_agents:
+                formatter = self.im_client.formatter
+                channel_context = self._get_channel_context(context)
+                await self.im_client.send_message(
+                    channel_context,
+                    formatter.format_message(
+                        f"❌ Unknown agent: {formatter.format_code_inline(args)}",
+                        "",
+                        f"Available: {formatter.format_code_inline(', '.join(available_agents))}",
+                    ),
+                )
+                return
+
+            # Set user preference
+            settings_key = self.controller._get_settings_key(context)
+            self.settings_manager.set_preferred_agent(settings_key, args)
+
+            # Clear current sessions
+            cleared = await self.controller.agent_service.clear_sessions(settings_key)
+
+            # Get display name and send confirmation
+            agent_display = get_agent_display_name(args)
+            formatter = self.im_client.formatter
+
+            if cleared:
+                details = "\n".join(
+                    f"• {agent} → {count} session(s)" for agent, count in cleared.items()
+                )
+                message = formatter.format_message(
+                    f"✅ Switched to {formatter.format_bold(agent_display)}",
+                    "",
+                    f"Cleared sessions:\n{details}",
+                    "",
+                    f"Conversation context has been reset.",
+                )
+            else:
+                message = formatter.format_message(
+                    f"✅ Switched to {formatter.format_bold(agent_display)}",
+                    "",
+                    "Conversation context has been reset.",
+                )
+
+            channel_context = self._get_channel_context(context)
+            await self.im_client.send_message(channel_context, message)
+            logger.info(f"User {context.user_id} switched to agent {args}")
+
+        except Exception as e:
+            logger.error(f"Error handling agent command: {e}", exc_info=True)
+            channel_context = self._get_channel_context(context)
+            await self.im_client.send_message(
+                channel_context,
+                f"❌ Error switching agent: {str(e)}",
+            )
+
+    def _get_current_agent(self, context: MessageContext) -> str:
+        """Get the current agent name for display."""
+        settings_key = self.controller._get_settings_key(context)
+        agent_name = self.controller.agent_router.resolve(
+            self.config.platform, settings_key
+        )
+        default_agent = getattr(self.controller.agent_service, "default_agent", None)
+        return get_agent_display_name(
+            agent_name, fallback=default_agent or "Unknown"
+        )

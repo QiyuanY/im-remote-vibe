@@ -33,6 +33,32 @@ class ChatbotMessageHandler(ChatbotHandler):
     def __init__(self, bot_instance):
         super().__init__()
         self.bot = bot_instance
+        # Shared event loop for Claude's long-running receiver tasks
+        self._loop = None
+        self._loop_thread = None
+        self._pending_tasks = []
+
+    def _get_or_create_loop(self):
+        """Get or create the shared event loop for async operations."""
+        if self._loop is not None and self._loop.is_running():
+            return self._loop
+
+        if self._loop_thread and self._loop_thread.is_alive():
+            return self._loop
+
+        # Create new event loop in a dedicated thread
+        import queue
+        result_queue = queue.Queue()
+
+        def run_loop():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            result_queue.put(self._loop)
+            self._loop.run_forever()
+
+        self._loop_thread = threading.Thread(target=run_loop, daemon=True)
+        self._loop_thread.start()
+        return result_queue.get(timeout=5)
 
     async def process(self, callback_message: CallbackMessage):
         """Process incoming chatbot message
@@ -40,16 +66,27 @@ class ChatbotMessageHandler(ChatbotHandler):
         Args:
             callback_message: CallbackMessage from dingtalk-stream SDK
         """
-        # Run message processing in a new thread to avoid blocking
-        import threading
-        thread = threading.Thread(target=self._process_message, args=(callback_message,))
-        thread.daemon = True
-        thread.start()
-        # Return OK immediately - this is the ACK for DingTalk
+        # Run message processing in the shared event loop
+        loop = self._get_or_create_loop()
+
+        # Create a completion callback for logging/errors
+        def task_done(fut):
+            try:
+                fut.result()
+            except Exception as e:
+                logger.error(f"Error in async task: {e}", exc_info=True)
+
+        # Submit the task to the shared loop
+        future = asyncio.run_coroutine_threadsafe(
+            self._process_message(callback_message), loop
+        )
+        future.add_done_callback(task_done)
+
+        # Return ACK immediately (don't wait for completion)
         return 200, "OK"
 
-    def _process_message(self, callback_message: CallbackMessage):
-        """Process message in a separate thread
+    async def _process_message(self, callback_message: CallbackMessage):
+        """Process message asynchronously
 
         Args:
             callback_message: CallbackMessage from dingtalk-stream SDK
@@ -96,36 +133,15 @@ class ChatbotMessageHandler(ChatbotHandler):
 
                 handler = self.bot.on_command_callbacks.get(command)
                 if handler:
-                    # Run async handler in new event loop
-                    self._run_async_handler(handler, context, args)
+                    await handler(context, args)
                     return
 
             # Handle as regular message
             if self.bot.on_message_callback:
-                self._run_async_handler(self.bot.on_message_callback, context, content)
+                await self.bot.on_message_callback(context, content)
 
         except Exception as e:
             logger.error(f"Error processing stream message: {e}", exc_info=True)
-
-    def _run_async_handler(self, handler, *args):
-        """Run an async handler in a new event loop
-
-        Args:
-            handler: Async function to run
-            *args: Arguments to pass to the handler
-        """
-        def run_in_loop():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(handler(*args))
-                loop.close()
-            except Exception as e:
-                logger.error(f"Error running async handler: {e}", exc_info=True)
-
-        thread = threading.Thread(target=run_in_loop)
-        thread.daemon = True
-        thread.start()
 
 
 class DingtalkBot(BaseIMClient):

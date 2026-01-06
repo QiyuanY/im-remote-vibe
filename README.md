@@ -67,6 +67,22 @@ claude --help
 
 ## Quick Start
 
+**Option 1: Interactive Setup (Recommended)**
+
+Run the setup wizard for guided configuration:
+
+```bash
+python3 setup.py
+```
+
+The wizard will guide you through:
+- Platform selection (Slack/Telegram/DingTalk)
+- Token configuration with validation
+- Agent selection and settings
+- Automatic `.env` file generation
+
+**Option 2: Manual Setup**
+
 1. Install dependencies
 
 ```bash

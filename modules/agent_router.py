@@ -76,7 +76,28 @@ class AgentRouter:
         with open(path, "r") as f:
             return json.load(f)
 
-    def resolve(self, platform: str, channel_id: str) -> str:
+    def resolve(self, platform: str, channel_id: str, user_preference: Optional[str] = None) -> str:
+        """Resolve which agent should serve a given message context.
+
+        Priority order:
+        1. User preference (if set)
+        2. Platform-specific override for channel
+        3. Platform default
+        4. Global default
+
+        Args:
+            platform: The IM platform (slack, telegram, dingtalk)
+            channel_id: The channel/conversation ID
+            user_preference: Optional user's preferred agent (overrides config)
+
+        Returns:
+            The agent name to use
+        """
+        # 1. User preference has highest priority
+        if user_preference:
+            return user_preference
+
+        # 2. Platform-specific routing
         platform_route = self.platform_routes.get(platform)
         if not platform_route:
             return self.global_default

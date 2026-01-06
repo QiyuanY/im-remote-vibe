@@ -73,8 +73,10 @@ class MessageHandler:
             )
             settings_key = self._get_settings_key(context)
 
+            # Get user preference first, then resolve agent
+            user_preference = self.settings_manager.get_preferred_agent(settings_key)
             agent_name = self.controller.agent_router.resolve(
-                self.config.platform, settings_key
+                self.config.platform, settings_key, user_preference
             )
             ack_context = self._get_target_context(context)
             ack_text = self._get_ack_text(agent_name)
@@ -187,8 +189,9 @@ class MessageHandler:
                 self.session_handler.get_session_info(context)
             )
             settings_key = self._get_settings_key(context)
+            user_preference = self.settings_manager.get_preferred_agent(settings_key)
             agent_name = self.controller.agent_router.resolve(
-                self.config.platform, settings_key
+                self.config.platform, settings_key, user_preference
             )
             request = AgentRequest(
                 context=context,

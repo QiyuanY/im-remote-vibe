@@ -24,6 +24,9 @@ class ClaudeAgent(BaseAgent):
         self.claude_sessions = controller.claude_sessions
         self.claude_client = controller.claude_client
         self._last_assistant_text: dict[str, str] = {}
+        # Message buffer for batching same-type messages
+        self._pending_messages: dict[str, list[str]] = {}  # composite_key -> [(msg_type, text), ...]
+        self._flush_tasks: dict[str, Optional[asyncio.Task]] = {}
 
     async def handle_message(self, request: AgentRequest) -> None:
         context = request.context
@@ -84,6 +87,28 @@ class ClaudeAgent(BaseAgent):
         # Legacy session manager cleanup (best-effort)
         await self.session_manager.clear_session(settings_key)
 
+        # Clear message buffers and flush tasks for cleared sessions
+        for composite_key in list(self._pending_messages.keys()):
+            # composite_key format: base_session_id:working_path
+            base_part = composite_key.split(":")[0] if ":" in composite_key else composite_key
+            if base_part in session_bases_to_clear:
+                del self._pending_messages[composite_key]
+                logger.debug(f"Cleared pending messages for {composite_key}")
+
+        for composite_key, task in list(self._flush_tasks.items()):
+            base_part = composite_key.split(":")[0] if ":" in composite_key else composite_key
+            if base_part in session_bases_to_clear:
+                if task and not task.done():
+                    task.cancel()
+                del self._flush_tasks[composite_key]
+                logger.debug(f"Cancelled flush task for {composite_key}")
+
+        # Clear assistant text cache
+        for composite_key in list(self._last_assistant_text.keys()):
+            base_part = composite_key.split(":")[0] if ":" in composite_key else composite_key
+            if base_part in session_bases_to_clear:
+                del self._last_assistant_text[composite_key]
+
         return len(sessions_to_clear) or len(session_bases_to_clear)
 
     async def handle_stop(self, request: AgentRequest) -> bool:
@@ -115,6 +140,48 @@ class ClaudeAgent(BaseAgent):
             )
             return False
 
+    async def _flush_pending_messages(self, composite_key: str, context: MessageContext):
+        """Flush and send all pending messages for a session."""
+        if composite_key not in self._pending_messages:
+            return
+
+        messages = self._pending_messages.pop(composite_key, [])
+        if not messages:
+            return
+
+        # Group by message type and combine
+        by_type: dict[str, list[str]] = {}
+        for msg_type, text in messages:
+            if msg_type not in by_type:
+                by_type[msg_type] = []
+            by_type[msg_type].append(text)
+
+        # Send each combined message
+        for msg_type, texts in by_type.items():
+            combined = "\n\n".join(texts)
+            await self.controller.emit_agent_message(
+                context, msg_type, combined, parse_mode="markdown"
+            )
+
+    async def _schedule_flush(self, composite_key: str, context: MessageContext, delay: float = 0.2):
+        """Schedule a flush after delay. New messages will reset the timer."""
+
+        # Cancel existing flush task
+        existing_task = self._flush_tasks.get(composite_key)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
+        # Create new flush task
+        async def flush_after_delay():
+            try:
+                await asyncio.sleep(delay)
+                await self._flush_pending_messages(composite_key, context)
+            except asyncio.CancelledError:
+                pass  # Task was cancelled by new message
+
+        loop = asyncio.get_event_loop()
+        self._flush_tasks[composite_key] = loop.create_task(flush_after_delay())
+
     async def _receive_messages(
         self,
         client,
@@ -126,6 +193,7 @@ class ClaudeAgent(BaseAgent):
         try:
             settings_key = self.controller._get_settings_key(context)
             composite_key = f"{base_session_id}:{working_path}"
+
             async for message in client.receive_messages():
                 try:
                     claude_session_id = self._maybe_capture_session_id(
@@ -141,6 +209,7 @@ class ClaudeAgent(BaseAgent):
 
                     message_type = self._detect_message_type(message)
                     formatted_message = None
+
                     if message_type == "assistant":
                         formatted_message = self.claude_client.format_message(
                             message,
@@ -156,21 +225,55 @@ class ClaudeAgent(BaseAgent):
                         ):
                             continue
                     elif message_type == "result":
+                        # Flush any pending messages before sending result
+                        await self._flush_pending_messages(composite_key, context)
+                        # Cancel pending flush task
+                        existing_task = self._flush_tasks.get(composite_key)
+                        if existing_task and not existing_task.done():
+                            existing_task.cancel()
+
                         if self.settings_manager.is_message_type_hidden(
                             settings_key, message_type
                         ):
                             self._last_assistant_text.pop(composite_key, None)
                             continue
                         result_text = getattr(message, "result", None)
-                        if (
-                            not result_text
-                            and self.settings_manager.is_message_type_hidden(
-                                settings_key, "assistant"
-                            )
-                        ):
-                            fallback = self._last_assistant_text.get(composite_key)
-                            if fallback:
-                                result_text = fallback
+                        # Only emit result message if there's actual result content
+                        # If result_text is empty and assistant wasn't hidden, the assistant
+                        # message was already shown, so skip the duplicate
+                        if not result_text:
+                            logger.debug(f"Skipping empty result message")
+                            self._last_assistant_text.pop(composite_key, None)
+                            continue
+                        # Skip result if it's identical to the last assistant message (avoid duplicate)
+                        last_assistant = self._last_assistant_text.get(composite_key, "")
+                        result_trimmed = result_text.strip()
+                        last_trimmed = last_assistant.strip()
+
+                        # Check various duplication scenarios:
+                        # 1. Exact match
+                        if result_trimmed == last_trimmed:
+                            logger.debug(f"Skipping result message (exact match with assistant)")
+                            self._last_assistant_text.pop(composite_key, None)
+                            continue
+                        # 2. Result starts with assistant text (result = assistant + extra)
+                        if last_trimmed and result_trimmed.startswith(last_trimmed):
+                            extra_content = result_trimmed[len(last_trimmed):].strip()
+                            if not extra_content or len(extra_content) < 50:
+                                logger.debug(f"Skipping result message (assistant is prefix, extra: {len(extra_content)} chars)")
+                                self._last_assistant_text.pop(composite_key, None)
+                                continue
+                        # 3. Assistant ends with result text (assistant = process + result)
+                        # This is the common case: assistant shows tool calls + final result,
+                        # and result only shows the final result again
+                        if last_trimmed and last_trimmed.endswith(result_trimmed):
+                            preceding_content = last_trimmed[:-len(result_trimmed)].strip()
+                            # Check if the preceding content is substantial (tool calls, etc.)
+                            # If assistant is significantly longer than result, it likely contains process info
+                            if len(last_trimmed) > len(result_trimmed) * 1.5:  # Assistant is 50%+ longer
+                                logger.debug(f"Skipping result message (result is suffix of assistant, assistant has {len(preceding_content)} chars of preceding content)")
+                                self._last_assistant_text.pop(composite_key, None)
+                                continue
                         suffix = "---" if self.config.platform == "slack" else None
                         await self.emit_result_message(
                             context,
@@ -208,33 +311,33 @@ class ClaudeAgent(BaseAgent):
                     if self.config.platform == "slack":
                         formatted_message = formatted_message + "\n---"
 
-                    await self.controller.emit_agent_message(
-                        context,
-                        message_type or "assistant",
-                        formatted_message,
-                        parse_mode="markdown",
+                    # Buffer the message and schedule delayed send
+                    if composite_key not in self._pending_messages:
+                        self._pending_messages[composite_key] = []
+                    self._pending_messages[composite_key].append(
+                        (message_type or "assistant", formatted_message)
                     )
 
-                    if message_type == "result":
-                        self._last_assistant_text.pop(composite_key, None)
-                        session = await self.session_manager.get_or_create_session(
-                            context.user_id, context.channel_id
-                        )
-                        if session:
-                            session.session_active[
-                                f"{base_session_id}:{working_path}"
-                            ] = False
+                    # Schedule flush after delay (new messages reset timer)
+                    await self._schedule_flush(composite_key, context)
+
                 except Exception as e:
                     logger.error(
                         f"Error processing message from Claude: {e}", exc_info=True
                     )
                     continue
+
+            # Flush any remaining pending messages when stream ends
+            await self._flush_pending_messages(composite_key, context)
+
         except Exception as e:
             composite_key = f"{base_session_id}:{working_path}"
             logger.error(
                 f"Error in Claude receiver for session {composite_key}: {e}",
                 exc_info=True,
             )
+            # Flush pending messages on error
+            await self._flush_pending_messages(composite_key, context)
             await self.session_handler.handle_session_error(composite_key, context, e)
 
     async def _delete_ack(self, context: MessageContext, request: AgentRequest):
