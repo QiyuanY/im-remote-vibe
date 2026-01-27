@@ -78,6 +78,13 @@ class Controller:
         self.session_manager = SessionManager()
         self.settings_manager = SettingsManager()
 
+        # Set platform-specific defaults
+        if self.config.platform == "dingtalk":
+            # For DingTalk, hide assistant messages by default to reduce noise
+            # since DingTalk doesn't support message threads well
+            self.settings_manager.default_hidden_types = ["assistant"]
+            logger.info("Set default hidden message types for DingTalk: ['assistant']")
+
         # Agent routing (service initialized later after handlers)
         self.agent_router = AgentRouter.from_file(
             self.config.agent_route_file, platform=self.config.platform

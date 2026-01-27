@@ -47,6 +47,7 @@ class SettingsManager:
     def __init__(self, settings_file: str = "user_settings.json"):
         self.settings_file = Path(settings_file)
         self.settings: Dict[Union[int, str], UserSettings] = {}
+        self.default_hidden_types: List[str] = []
         self._load_settings()
 
     # ---------------------------------------------
@@ -141,7 +142,10 @@ class SettingsManager:
 
         # Return existing or create new
         if normalized_id not in self.settings:
-            self.settings[normalized_id] = UserSettings()
+            # Copy default hidden types to new user settings
+            self.settings[normalized_id] = UserSettings(
+                hidden_message_types=self.default_hidden_types.copy()
+            )
             self._save_settings()
         return self.settings[normalized_id]
 
