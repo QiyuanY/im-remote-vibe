@@ -152,6 +152,7 @@ class DingtalkBot(BaseIMClient):
         self.config = config
         self.stream_client: Optional[DingTalkStreamClient] = None
         self.access_token: Optional[str] = None
+        self.token_expires_at: float = 0
 
         # Initialize DingTalk formatter
         self.formatter = DingtalkFormatter()
@@ -190,7 +191,7 @@ class DingtalkBot(BaseIMClient):
         Returns:
             Access token string
         """
-        if self.access_token:
+        if self.access_token and time.time() < self.token_expires_at - 60:
             return self.access_token
 
         # DingTalk get access token API
@@ -228,7 +229,12 @@ class DingtalkBot(BaseIMClient):
                 if not self.access_token:
                     logger.error(f"No access token in response: {data}")
                     raise RuntimeError(f"No access token in response: {data}")
-                logger.info("Successfully obtained DingTalk access token")
+                
+                # Update expiration time (default to 7200s if not provided)
+                expires_in = data.get("expireIn", 7200)
+                self.token_expires_at = time.time() + expires_in
+                
+                logger.info(f"Successfully obtained DingTalk access token, expires in {expires_in}s")
                 return self.access_token
 
     async def send_message(self, context: MessageContext, text: str,
@@ -432,6 +438,21 @@ class DingtalkBot(BaseIMClient):
         """
         # DingTalk callbacks are handled via event subscriptions
         # Return True to indicate callback was processed
+        return True
+
+    async def delete_message(self, channel_id: str, message_id: str) -> bool:
+        """Delete a message (Not fully supported on DingTalk)
+
+        Args:
+            channel_id: Channel ID
+            message_id: Message ID to delete
+
+        Returns:
+            True (to prevent errors in controller)
+        """
+        # DingTalk doesn't support deleting messages via robot API easily
+        # We return True to prevent errors in the controller where _delete_ack is called
+        logger.debug(f"delete_message called for {message_id}, not supported on DingTalk")
         return True
 
     def register_handlers(self):
