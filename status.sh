@@ -5,9 +5,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="$SCRIPT_DIR/.bot.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
 MAIN_PATH="$SCRIPT_DIR/main.py"
+LOG_FILE="$LOG_DIR/vibe_remote.log"
 
-echo "Claude Proxy Status"
+echo "vibe-remote Status"
 echo "==================="
+
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    PLATFORM=$(cd "$SCRIPT_DIR" && python3 - <<'PY' 2>/dev/null || true
+from dotenv import load_dotenv
+import os
+load_dotenv()
+print(os.getenv("IM_PLATFORM", ""))
+PY
+)
+    if [ -n "$PLATFORM" ]; then
+        echo "Platform: $PLATFORM"
+    fi
+fi
 
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
@@ -25,16 +39,12 @@ if [ -f "$PID_FILE" ]; then
             echo "Process info:"
             ps -p "$PID" -o pid,vsz,rss,pcpu,pmem,etime,command
             
-            # Show latest log file
-            if [ -d "$LOG_DIR" ]; then
-                LATEST_LOG=$(ls -t "$LOG_DIR"/bot_*.log 2>/dev/null | head -1)
-                if [ -n "$LATEST_LOG" ]; then
-                    echo ""
-                    echo "Latest log file: $LATEST_LOG"
-                    echo "Last 10 lines:"
-                    echo "---"
-                    tail -n 10 "$LATEST_LOG"
-                fi
+            if [ -f "$LOG_FILE" ]; then
+                echo ""
+                echo "Log file: $LOG_FILE"
+                echo "Last 30 lines:"
+                echo "---"
+                tail -n 30 "$LOG_FILE"
             fi
         else
             echo "Status: STOPPED (stale PID file)"

@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="$SCRIPT_DIR/.bot.pid"
 MAIN_PATH="$SCRIPT_DIR/main.py"
 
-echo "Stopping Claude Proxy..."
+echo "Stopping vibe-remote..."
 
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")

@@ -3,14 +3,19 @@
 # Get the absolute path of current directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
-LOG_FILE="$LOG_DIR/bot_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="$LOG_DIR/vibe_remote.log"
 PID_FILE="$SCRIPT_DIR/.bot.pid"
 MAIN_PATH="$SCRIPT_DIR/main.py"
 
 # Create logs directory if it doesn't exist
 mkdir -p "$LOG_DIR"
 
-echo "Starting Telegram Bot Manager..."
+MODE="background"
+if [ "$1" = "--foreground" ] || [ "$1" = "-f" ]; then
+    MODE="foreground"
+fi
+
+echo "Starting vibe-remote..."
 echo "Working directory: $SCRIPT_DIR"
 echo "Log file: $LOG_FILE"
 
@@ -64,8 +69,7 @@ cd "$SCRIPT_DIR"
 
 # Load environment variables from .env file if it exists
 if [ -f .env ]; then
-    # shellcheck disable=SC2046
-    export $(grep -v '^#' .env | xargs)
+    :
 else
     echo "ERROR: .env file not found!"
     echo "Please create a .env file with required environment variables."
@@ -88,34 +92,47 @@ else
     echo "No virtual environment found, using system Python"
 fi
 
+# Validate configuration
+echo "Validating configuration..."
+python3 - <<'PY'
+from dotenv import load_dotenv
+load_dotenv()
+from config.settings import AppConfig
+AppConfig.from_env()
+print("Config OK")
+PY
+
 # Start the bot with output redirected to log file
-echo "Starting bot..."
 echo "============================================" >> "$LOG_FILE"
-echo "Bot started at: $(date)" >> "$LOG_FILE"
+echo "Started at: $(date)" >> "$LOG_FILE"
 echo "============================================" >> "$LOG_FILE"
 
-# Run python in unbuffered mode for real-time logging
+if [ "$MODE" = "foreground" ]; then
+    echo "Running in foreground mode (Ctrl+C to stop)..."
+    python3 -u "$MAIN_PATH" 2>&1 | tee -a "$LOG_FILE"
+    exit $?
+fi
+
+echo "Starting in background..."
 nohup python3 -u "$MAIN_PATH" >> "$LOG_FILE" 2>&1 &
 
-# Save new PID
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"
 
-# Check if process started successfully
 sleep 2
 if ps -p "$NEW_PID" > /dev/null 2>&1; then
-    echo "Bot started successfully (PID: $NEW_PID)"
+    echo "vibe-remote started successfully (PID: $NEW_PID)"
     echo "Logs are being written to: $LOG_FILE"
     echo ""
     echo "To view logs in real-time:"
     echo "  tail -f $LOG_FILE"
     echo ""
-    echo "To stop the bot:"
+    echo "To stop:"
     echo "  $SCRIPT_DIR/stop.sh"
 else
-    echo "ERROR: Failed to start bot!"
+    echo "ERROR: Failed to start vibe-remote!"
     echo "Check the log file for errors: $LOG_FILE"
-    tail -n 20 "$LOG_FILE"
+    tail -n 40 "$LOG_FILE"
     rm -f "$PID_FILE"
     exit 1
 fi
