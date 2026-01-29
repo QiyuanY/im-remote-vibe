@@ -100,7 +100,9 @@ cp .env.example .env
 
 ```bash
 ./start.sh
-# or
+# Foreground (debug)
+./start.sh --foreground
+# Direct run (debug)
 python main.py
 ```
 

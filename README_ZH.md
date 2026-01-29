@@ -100,7 +100,9 @@ cp .env.example .env
 
 ```bash
 ./start.sh
-# 或
+# 前台调试
+./start.sh --foreground
+# 直接运行（调试）
 python main.py
 ```
 

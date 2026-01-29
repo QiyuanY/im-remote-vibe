@@ -11,7 +11,7 @@ Thanks for your interest in contributing!
 
 ## Development
 
-- Run locally: `python main.py`
+- Run locally: `./start.sh --foreground`
 - Lint before PR (add your linter if used)
 - Write clear commit messages
 - Codex-specific changes: install the Codex CLI, copy `agent_routes.example.yaml` → `agent_routes.yaml`, and route one Slack channel / Telegram chat to `codex` for manual testing (see `docs/CODEX_SETUP.md`).

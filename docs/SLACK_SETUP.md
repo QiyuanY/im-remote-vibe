@@ -268,6 +268,8 @@ Before the bot can interact with a channel, you need to invite it:
 ## Step 9: Start the Bot
 
 ```bash
+./start.sh
+./start.sh --foreground
 python main.py
 ```
 

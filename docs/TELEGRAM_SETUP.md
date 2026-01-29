@@ -125,6 +125,8 @@ This allows the bot to see all messages in groups, not just commands.
 ## Step 5: Start the Bot
 
 ```bash
+./start.sh
+./start.sh --foreground
 python main.py
 ```
 

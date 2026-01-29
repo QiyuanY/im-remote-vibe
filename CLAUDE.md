@@ -37,7 +37,10 @@ cp .env.example .env
 # Start the bot (preferred - includes process management)
 ./start.sh
 
-# Alternative direct start
+# Foreground (debug)
+./start.sh --foreground
+
+# Alternative direct start (debug)
 python main.py
 
 # Stop the bot
@@ -54,11 +57,11 @@ python main.py
 python3 -c "from config.settings import AppConfig; from modules.im import IMFactory; print('Imports successful!')"
 
 # Check logs in real-time
-tail -f logs/bot_*.log
+tail -f logs/vibe_remote.log
 
 # Manual testing with specific platform
-IM_PLATFORM=telegram python main.py
-IM_PLATFORM=slack python main.py
+IM_PLATFORM=telegram ./start.sh --foreground
+IM_PLATFORM=slack ./start.sh --foreground
 ```
 
 ## Architecture Overview

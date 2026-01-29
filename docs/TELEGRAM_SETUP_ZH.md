@@ -125,6 +125,8 @@ CLAUDE_CWD=/path/to/your/project
 ## 步骤 5：启动机器人
 
 ```bash
+./start.sh
+./start.sh --foreground
 python main.py
 ```
 

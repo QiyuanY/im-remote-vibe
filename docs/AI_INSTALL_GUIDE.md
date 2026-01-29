@@ -255,15 +255,15 @@ mkdir -p ./_tmp
 **Start Commands:**
 
 ```bash
-# Option 1: Direct start (for testing)
-python main.py
-
-# Option 2: Daemon start (for production)
+# Option 1: Daemon start (recommended)
 chmod +x start.sh
 ./start.sh
 
-# Option 3: Background with nohup
-nohup python main.py > logs/bot.log 2>&1 &
+# Option 2: Foreground (debug)
+./start.sh --foreground
+
+# Option 3: Direct run (debug)
+python main.py
 ```
 
 ---
@@ -384,7 +384,7 @@ Management commands:
   ./stop.sh   - Stop the service
   ./status.sh - Check service status
 
-Logs are saved in: logs/bot_*.log
+Logs are saved in: logs/vibe_remote.log
 Configuration: .env
 Settings persistence: user_settings.json
 ```
@@ -400,7 +400,7 @@ Provide these to users if they encounter issues:
 ./status.sh
 
 # View real-time logs
-tail -f logs/bot_*.log
+tail -f logs/vibe_remote.log
 
 # Test configuration
 python -c "from config.settings import AppConfig; print('Config OK')"

@@ -113,7 +113,7 @@ dingtalk:
 
 2. 查看日志：
    ```bash
-   tail -f logs/bot_*.log
+  tail -f logs/vibe_remote.log
    ```
 
 ### 首次消息响应慢

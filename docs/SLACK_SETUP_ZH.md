@@ -268,6 +268,8 @@ SLACK_TARGET_CHANNEL=[C1234567890,C0987654321]
 ## 步骤 9：启动机器人
 
 ```bash
+./start.sh
+./start.sh --foreground
 python main.py
 ```
 

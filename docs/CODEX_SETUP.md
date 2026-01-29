@@ -63,5 +63,5 @@ In a routed Slack channel run `@VibeRemote status` or any question—you should 
 ## 5. Troubleshooting
 
 - **“Agent `codex` is not configured”**: ensure `codex` CLI is installed and on PATH; check `CODEX_ENABLED`.
-- **`codex exec` errors**: inspect the Slack/Telegram stderr snippet or tail the latest `logs/bot_*.log`.
+- **`codex exec` errors**: inspect the Slack/Telegram stderr snippet or tail `logs/vibe_remote.log`.
 - **Routing not applied**: confirm the channel ID matches Slack’s `C...` value (copy from channel details) or Telegram’s numeric chat ID, and restart the bot after editing `agent_routes.yaml`.

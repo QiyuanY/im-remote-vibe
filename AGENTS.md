@@ -7,7 +7,8 @@
 - `python -m venv .venv && source .venv/bin/activate` – create an isolated environment before installing dependencies.
 - `pip install -r requirements.txt` – install the Slack/Telegram/Claude clients plus Codex routing deps (`PyYAML` for route parsing).
 - `cp .env.example .env` – seed configuration; update IM platform tokens, `CLAUDE_DEFAULT_CWD`, and permission mode.
-- `./start.sh` (or `python main.py`) – run the bot locally; prefers Slack when both tokens exist.
+- `./start.sh` – run the bot locally; prefers Slack when both tokens exist.
+- `./start.sh --foreground` – run in the foreground for debugging.
 - `./status.sh` / `./stop.sh` – check or terminate the background process when using the helper scripts.
 
 ## Coding Style & Naming Conventions

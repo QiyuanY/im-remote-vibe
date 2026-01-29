@@ -254,15 +254,15 @@ mkdir -p ./_tmp
 **启动命令：**
 
 ```bash
-# 方式 1：直接启动（用于测试）
-python main.py
-
-# 方式 2：守护进程启动（用于生产环境）
+# 方式 1：守护进程启动（推荐）
 chmod +x start.sh
 ./start.sh
 
-# 方式 3：后台运行
-nohup python main.py > logs/bot.log 2>&1 &
+# 方式 2：前台调试
+./start.sh --foreground
+
+# 方式 3：直接运行（调试）
+python main.py
 ```
 
 ---
@@ -383,7 +383,7 @@ AI: 安装完成！现在您可以：
   ./stop.sh   - 停止服务
   ./status.sh - 检查服务状态
 
-日志保存在：logs/bot_*.log
+日志保存在：logs/vibe_remote.log
 配置文件：.env
 设置持久化：user_settings.json
 ```
@@ -399,7 +399,7 @@ AI: 安装完成！现在您可以：
 ./status.sh
 
 # 实时查看日志
-tail -f logs/bot_*.log
+tail -f logs/vibe_remote.log
 
 # 测试配置
 python -c "from config.settings import AppConfig; print('配置正常')"
