@@ -34,12 +34,13 @@ Vibe Remote lets you operate coding agents via IM. Type in Slack or Telegram to 
 
 ## Core Features
 
-- **Multi‑platform**: First‑class Slack & Telegram support
+- **Multi‑platform**: First‑class Slack, Telegram & DingTalk support
 - **Hands‑free flow**: Minimal review; messages stream back in real time
 - **Persistent sessions**: Per chat/thread sessions, easy resume
 - **Threaded Slack UX**: Clean, per‑conversation threads
 - **Working dir control**: Inspect and change `cwd` on the fly
 - **Personalization**: Toggle which message types to display
+- **Extensive Commands**: Run shell commands, explore files, and check status directly via IM
 
 ## Architecture (Brief)
 
@@ -170,7 +171,14 @@ telegram:
 - `/clear` reset conversation/session
 - `/cwd` show working directory
 - `/set_cwd <path>` change working directory
+- `@@` switch working directory to project root
+- `/run <command>` execute shell command in current directory
+- `/ls [path]` list directory contents
 - `/settings` configure message visibility
+- `/status` check agent and system status
+- `/history` view recent session history
+- `/viz` generate project runtime visualization
+- `/agent` switch the active coding agent for the current session
 - `/stop` force-stop the active agent session (Claude interrupt / Codex process kill)
 
 ### Slack

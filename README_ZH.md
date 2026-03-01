@@ -34,12 +34,13 @@ Vibe Remote 把 AI 写代码搬到聊天软件。你在 Slack/Telegram 输入意
 
 ## 核心特性
 
-- **多平台**：原生支持 Slack 与 Telegram
+- **多平台**：原生支持 Slack、Telegram 与 钉钉 (DingTalk)
 - **免干预工作流**：最小 review，实时流式回传消息
 - **持久会话**：按聊天/线程维度持久化，可随时恢复
 - **Slack 线程化 UX**：每个会话独立线程，保持频道整洁
 - **工作目录控制**：随时查看与更改 `cwd`
 - **个性化**：自定义隐藏的消息类型
+- **丰富命令**：直接通过 IM 运行 Shell 命令、浏览文件及查看状态
 
 ## 架构（简述）
 
@@ -168,7 +169,14 @@ telegram:
 - `/clear` 重置对话/会话
 - `/cwd` 显示工作目录
 - `/set_cwd <path>` 更改工作目录
+- `@@` 将工作目录切换至项目根目录
+- `/run <command>` 在当前目录下执行 Shell 命令
+- `/ls [path]` 列出目录结构
 - `/settings` 配置消息可见性
+- `/status` 查看 Agent 与系统的工作状态
+- `/history` 查看最近的会话历史记录
+- `/viz` 生成项目运行状态的可视化图表
+- `/agent` 为当前会话切换活动的代码 Agent
 - `/stop` 强制停止当前 Agent（Claude 发送 interrupt，Codex 直接终止进程）
 
 ### Slack
