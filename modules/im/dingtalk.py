@@ -51,15 +51,10 @@ class ChatbotMessageHandler(ChatbotHandler):
         # Shared event loop for Claude's long-running receiver tasks
         self._loop = None
         self._loop_thread = None
+        self._init_loop()
 
-    def _get_or_create_loop(self):
-        """Get or create the shared event loop for async operations."""
-        if self._loop is not None and self._loop.is_running():
-            return self._loop
-
-        if self._loop_thread and self._loop_thread.is_alive():
-            return self._loop
-
+    def _init_loop(self):
+        """Synchronously initialize the shared event loop for async operations."""
         import queue
         result_queue = queue.Queue()
 
@@ -71,12 +66,11 @@ class ChatbotMessageHandler(ChatbotHandler):
 
         self._loop_thread = threading.Thread(target=run_loop, daemon=True)
         self._loop_thread.start()
-        return result_queue.get(timeout=5)
+        # Block until the event loop is successfully created and assigned
+        self._loop = result_queue.get(timeout=10)
 
     async def process(self, callback_message: CallbackMessage):
         """Process incoming chatbot message and ACK immediately."""
-        loop = self._get_or_create_loop()
-
         def task_done(fut):
             try:
                 fut.result()
@@ -84,7 +78,7 @@ class ChatbotMessageHandler(ChatbotHandler):
                 logger.error(f"Error in async task: {e}", exc_info=True)
 
         future = asyncio.run_coroutine_threadsafe(
-            self._process_message(callback_message), loop
+            self._process_message(callback_message), self._loop
         )
         future.add_done_callback(task_done)
         return 200, "OK"
@@ -320,7 +314,12 @@ class DingtalkBot(BaseIMClient):
         """Send markdown message via DingTalk session webhook."""
         import aiohttp
 
-        title = self._extract_title(text)
+        try:
+            title = self._extract_title(text)
+        except Exception as e:
+            logger.warning(f"Failed to extract title, using default: {e}")
+            title = "Vibe Remote"
+
         payload = {
             "msgtype": "markdown",
             "markdown": {"title": title, "text": text},
@@ -344,7 +343,11 @@ class DingtalkBot(BaseIMClient):
         robot_code = platform.get("robot_code") or self._get_cached_field(
             conversation_id, "robot_code", self.config.app_key
         )
-        title = self._extract_title(text)
+        try:
+            title = self._extract_title(text)
+        except Exception as e:
+            logger.warning(f"Failed to extract title, using default: {e}")
+            title = "Vibe Remote"
         msg_param = json.dumps({"title": title, "text": text}, ensure_ascii=False)
 
         url = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
@@ -384,7 +387,11 @@ class DingtalkBot(BaseIMClient):
             )
             raise RuntimeError("Cannot send message: no sender staff ID available")
 
-        title = self._extract_title(text)
+        try:
+            title = self._extract_title(text)
+        except Exception as e:
+            logger.warning(f"Failed to extract title, using default: {e}")
+            title = "Vibe Remote"
         msg_param = json.dumps({"title": title, "text": text}, ensure_ascii=False)
 
         url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
@@ -433,12 +440,17 @@ class DingtalkBot(BaseIMClient):
 
         webhook = platform.get("session_webhook")
         expired_time = platform.get("session_webhook_expired_time", 0)
-        if webhook and expired_time and time.time() * 1000 >= expired_time - 60_000:
+        # Check if webhook is expired (use > to avoid prematurely invalidating at exact boundary)
+        if webhook and expired_time and time.time() * 1000 > expired_time - 60_000:
             webhook = None
         if not webhook:
             webhook = self._get_valid_webhook(conversation_id)
 
-        title = self._extract_title(text)
+        try:
+            title = self._extract_title(text)
+        except Exception as e:
+            logger.warning(f"Failed to extract title, using default: {e}")
+            title = "Vibe Remote"
         btns = []
         for row in keyboard.buttons:
             for btn in row:

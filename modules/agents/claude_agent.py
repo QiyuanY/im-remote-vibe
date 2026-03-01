@@ -25,8 +25,12 @@ class ClaudeAgent(BaseAgent):
         self.claude_client = controller.claude_client
         self._last_assistant_text: dict[str, str] = {}
         # Message buffer for batching same-type messages
-        self._pending_messages: dict[str, list[str]] = {}  # composite_key -> [(msg_type, text), ...]
+        self._pending_messages: dict[str, list[tuple[str, str]]] = {}  # composite_key -> [(msg_type, text), ...]
         self._flush_tasks: dict[str, Optional[asyncio.Task]] = {}
+        # Lock for protecting concurrent access to message buffers
+        self._buffer_lock = asyncio.Lock()
+        # Max entries to prevent unbounded growth
+        self._MAX_BUFFER_ENTRIES = 1000
 
     async def handle_message(self, request: AgentRequest) -> None:
         context = request.context
@@ -62,6 +66,9 @@ class ClaudeAgent(BaseAgent):
 
     async def clear_sessions(self, settings_key: str) -> int:
         """Clear Claude sessions scoped to the provided settings key."""
+        # First, cleanup any stale buffers
+        await self._cleanup_stale_buffers()
+
         settings = self.settings_manager.get_user_settings(settings_key)
         claude_map = settings.session_mappings.get(self.name, {})
         session_bases_to_clear = set(claude_map.keys())
@@ -76,6 +83,15 @@ class ClaudeAgent(BaseAgent):
 
         for session_key in sessions_to_clear:
             try:
+                # First, cancel and wait for any associated receiver task
+                receiver_task = self.receiver_tasks.get(session_key)
+                if receiver_task and not receiver_task.done():
+                    receiver_task.cancel()
+                    try:
+                        await asyncio.wait_for(receiver_task, timeout=5.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        logger.debug(f"Receiver task for {session_key} cancelled or timed out")
+
                 client = self.claude_sessions[session_key]
                 if hasattr(client, "close"):
                     await client.close()
@@ -83,25 +99,27 @@ class ClaudeAgent(BaseAgent):
                 logger.warning(f"Error closing Claude session {session_key}: {e}")
             finally:
                 self.claude_sessions.pop(session_key, None)
+                self.receiver_tasks.pop(session_key, None)
 
         # Legacy session manager cleanup (best-effort)
         await self.session_manager.clear_session(settings_key)
 
-        # Clear message buffers and flush tasks for cleared sessions
-        for composite_key in list(self._pending_messages.keys()):
-            # composite_key format: base_session_id:working_path
-            base_part = composite_key.split(":")[0] if ":" in composite_key else composite_key
-            if base_part in session_bases_to_clear:
-                del self._pending_messages[composite_key]
-                logger.debug(f"Cleared pending messages for {composite_key}")
+        # Clear message buffers and flush tasks for cleared sessions (protected by lock)
+        async with self._buffer_lock:
+            for composite_key in list(self._pending_messages.keys()):
+                # composite_key format: base_session_id:working_path
+                base_part = composite_key.split(":")[0] if ":" in composite_key else composite_key
+                if base_part in session_bases_to_clear:
+                    del self._pending_messages[composite_key]
+                    logger.debug(f"Cleared pending messages for {composite_key}")
 
-        for composite_key, task in list(self._flush_tasks.items()):
-            base_part = composite_key.split(":")[0] if ":" in composite_key else composite_key
-            if base_part in session_bases_to_clear:
-                if task and not task.done():
-                    task.cancel()
-                del self._flush_tasks[composite_key]
-                logger.debug(f"Cancelled flush task for {composite_key}")
+            for composite_key, task in list(self._flush_tasks.items()):
+                base_part = composite_key.split(":")[0] if ":" in composite_key else composite_key
+                if base_part in session_bases_to_clear:
+                    if task and not task.done():
+                        task.cancel()
+                    del self._flush_tasks[composite_key]
+                    logger.debug(f"Cancelled flush task for {composite_key}")
 
         # Clear assistant text cache
         for composite_key in list(self._last_assistant_text.keys()):
@@ -142,14 +160,15 @@ class ClaudeAgent(BaseAgent):
 
     async def _flush_pending_messages(self, composite_key: str, context: MessageContext):
         """Flush and send all pending messages for a session."""
-        if composite_key not in self._pending_messages:
-            return
+        async with self._buffer_lock:
+            if composite_key not in self._pending_messages:
+                return
 
-        messages = self._pending_messages.pop(composite_key, [])
-        if not messages:
-            return
+            messages = self._pending_messages.pop(composite_key, [])
+            if not messages:
+                return
 
-        # Group by message type and combine
+        # Group by message type and combine (outside lock to avoid holding during async send)
         by_type: dict[str, list[str]] = {}
         for msg_type, text in messages:
             if msg_type not in by_type:
@@ -166,21 +185,49 @@ class ClaudeAgent(BaseAgent):
     async def _schedule_flush(self, composite_key: str, context: MessageContext, delay: float = 0.2):
         """Schedule a flush after delay. New messages will reset the timer."""
 
-        # Cancel existing flush task
-        existing_task = self._flush_tasks.get(composite_key)
-        if existing_task and not existing_task.done():
-            existing_task.cancel()
+        async with self._buffer_lock:
+            # Cancel existing flush task
+            existing_task = self._flush_tasks.get(composite_key)
+            if existing_task and not existing_task.done():
+                existing_task.cancel()
 
-        # Create new flush task
-        async def flush_after_delay():
-            try:
-                await asyncio.sleep(delay)
-                await self._flush_pending_messages(composite_key, context)
-            except asyncio.CancelledError:
-                pass  # Task was cancelled by new message
+            # Create new flush task
+            async def flush_after_delay():
+                try:
+                    await asyncio.sleep(delay)
+                    await self._flush_pending_messages(composite_key, context)
+                except asyncio.CancelledError:
+                    pass  # Task was cancelled by new message
 
-        loop = asyncio.get_event_loop()
-        self._flush_tasks[composite_key] = loop.create_task(flush_after_delay())
+            loop = asyncio.get_event_loop()
+            self._flush_tasks[composite_key] = loop.create_task(flush_after_delay())
+
+    async def _cleanup_stale_buffers(self):
+        """Clean up completed/failed flush tasks and empty pending message buffers."""
+        async with self._buffer_lock:
+            # Clean up completed tasks
+            for composite_key in list(self._flush_tasks.keys()):
+                task = self._flush_tasks.get(composite_key)
+                if task is None or task.done():
+                    self._flush_tasks.pop(composite_key, None)
+
+            # Clean up empty buffers
+            for composite_key in list(self._pending_messages.keys()):
+                if not self._pending_messages.get(composite_key):
+                    self._pending_messages.pop(composite_key, None)
+
+            # Prevent unbounded growth
+            if len(self._pending_messages) > self._MAX_BUFFER_ENTRIES:
+                # Remove oldest entries (first half)
+                keys_to_remove = list(self._pending_messages.keys())[:self._MAX_BUFFER_ENTRIES // 2]
+                for key in keys_to_remove:
+                    self._pending_messages.pop(key, None)
+                    # Also cancel any associated flush task
+                    task = self._flush_tasks.get(key)
+                    if task and not task.done():
+                        task.cancel()
+                    self._flush_tasks.pop(key, None)
+                logger.warning(f"Buffer overflow: removed {len(keys_to_remove)} stale entries")
 
     async def _receive_messages(
         self,
@@ -195,6 +242,9 @@ class ClaudeAgent(BaseAgent):
             composite_key = f"{base_session_id}:{working_path}"
 
             async for message in client.receive_messages():
+                # Periodically clean up stale buffers (every ~100 messages)
+                await self._cleanup_stale_buffers()
+
                 try:
                     claude_session_id = self._maybe_capture_session_id(
                         message, base_session_id, working_path, settings_key
@@ -218,12 +268,16 @@ class ClaudeAgent(BaseAgent):
                             ),
                         )
                         assistant_text = self._extract_text_blocks(message)
-                        if assistant_text:
-                            self._last_assistant_text[composite_key] = assistant_text
+                        # Check if assistant is hidden BEFORE saving to last_assistant_text
+                        # This prevents result messages from being skipped when assistant was hidden
                         if self.settings_manager.is_message_type_hidden(
                             settings_key, message_type
                         ):
+                            # Don't save assistant_text if hidden, so result won't be skipped
                             continue
+                        # Only save assistant_text if it was actually shown
+                        if assistant_text:
+                            self._last_assistant_text[composite_key] = assistant_text
                     elif message_type == "result":
                         # Flush any pending messages before sending result
                         await self._flush_pending_messages(composite_key, context)
@@ -284,13 +338,6 @@ class ClaudeAgent(BaseAgent):
                             suffix=suffix,
                         )
                         self._last_assistant_text.pop(composite_key, None)
-                        session = await self.session_manager.get_or_create_session(
-                            context.user_id, context.channel_id
-                        )
-                        if session:
-                            session.session_active[
-                                f"{base_session_id}:{working_path}"
-                            ] = False
                         continue
                     else:
                         if message_type and self.settings_manager.is_message_type_hidden(
@@ -311,12 +358,13 @@ class ClaudeAgent(BaseAgent):
                     if self.config.platform == "slack":
                         formatted_message = formatted_message + "\n---"
 
-                    # Buffer the message and schedule delayed send
-                    if composite_key not in self._pending_messages:
-                        self._pending_messages[composite_key] = []
-                    self._pending_messages[composite_key].append(
-                        (message_type or "assistant", formatted_message)
-                    )
+                    # Buffer the message and schedule delayed send (protected by lock)
+                    async with self._buffer_lock:
+                        if composite_key not in self._pending_messages:
+                            self._pending_messages[composite_key] = []
+                        self._pending_messages[composite_key].append(
+                            (message_type or "assistant", formatted_message)
+                        )
 
                     # Schedule flush after delay (new messages reset timer)
                     await self._schedule_flush(composite_key, context)

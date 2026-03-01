@@ -1,16 +1,22 @@
-"""Command handlers for bot commands like /start, /clear, /cwd, etc."""
+"""
+Basic command handlers for bot commands like /start, /clear, /cwd, /agent, /stop.
+
+This module contains core user interaction commands. System and file operations
+have been moved to system_commands.py and file_commands.py respectively.
+"""
 
 import os
 import logging
 from typing import Optional
 from modules.agents import AgentRequest, get_agent_display_name
 from modules.im import MessageContext, InlineKeyboard, InlineButton
+from .error_handler import handle_error, format_user_error
 
 logger = logging.getLogger(__name__)
 
 
 class CommandHandlers:
-    """Handles all bot command operations"""
+    """Handles basic bot command operations"""
 
     def __init__(self, controller):
         """Initialize with reference to main controller"""
@@ -19,6 +25,7 @@ class CommandHandlers:
         self.im_client = controller.im_client
         self.session_manager = controller.session_manager
         self.settings_manager = controller.settings_manager
+        self.error_handler = controller.error_handler
 
     def _get_channel_context(self, context: MessageContext) -> MessageContext:
         """Get context for channel messages (no thread)"""
@@ -83,8 +90,14 @@ class CommandHandlers:
                 formatter.format_text("/start - Show this message"),
                 formatter.format_text("/agent - Switch AI agent"),
                 formatter.format_text("/clear - Reset session and start fresh"),
+                formatter.format_text("/status - Show system status"),
                 formatter.format_text("/cwd - Show current working directory"),
                 formatter.format_text("/set_cwd <path> - Set working directory"),
+                formatter.format_text("/ls [path] - List directory contents"),
+                formatter.format_text("/run <cmd> - Execute shell command"),
+                formatter.format_text("/viz <file> - Generate data visualization"),
+                formatter.format_text("/history [n] - View conversation history"),
+                formatter.format_text("@@ - Switch to project root"),
                 formatter.format_text("/settings - Personalization settings"),
                 formatter.format_text(
                     f"/stop - Interrupt {agent_display_name} execution"
@@ -116,12 +129,17 @@ class CommandHandlers:
                 InlineButton(text="📁 Current Dir", callback_data="cmd_cwd"),
                 InlineButton(text="📂 Change Work Dir", callback_data="cmd_change_cwd"),
             ],
-            # Row 2: Session and Settings
+            # Row 2: System and Session
             [
+                InlineButton(text="📊 System Status", callback_data="cmd_status"),
                 InlineButton(text="🔄 Clear All Session", callback_data="cmd_clear"),
-                InlineButton(text="⚙️ Settings", callback_data="cmd_settings"),
             ],
-            # Row 3: Help
+            # Row 3: Settings and History
+            [
+                InlineButton(text="⚙️ Settings", callback_data="cmd_settings"),
+                InlineButton(text="📜 History", callback_data="cmd_history"),
+            ],
+            # Row 4: Help
             [InlineButton(text="ℹ️ How it Works", callback_data="info_how_it_works")],
         ]
 
@@ -170,8 +188,9 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
             logger.error(f"Error clearing session: {e}", exc_info=True)
             try:
                 channel_context = self._get_channel_context(context)
+                error_msg = format_user_error(str(e), self.im_client.formatter)
                 await self.im_client.send_message(
-                    channel_context, f"❌ Error clearing session: {str(e)}"
+                    channel_context, error_msg
                 )
             except Exception as send_error:
                 logger.error(
@@ -207,8 +226,9 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
         except Exception as e:
             logger.error(f"Error getting cwd: {e}")
             channel_context = self._get_channel_context(context)
+            error_msg = handle_error(e, self.im_client.formatter, "Getting working directory")
             await self.im_client.send_message(
-                channel_context, f"Error getting working directory: {str(e)}"
+                channel_context, error_msg
             )
 
     async def handle_set_cwd(self, context: MessageContext, args: str):
@@ -235,8 +255,9 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
                     logger.info(f"Created directory: {absolute_path}")
                 except Exception as e:
                     channel_context = self._get_channel_context(context)
+                    error_msg = handle_error(e, self.im_client.formatter, "Creating directory")
                     await self.im_client.send_message(
-                        channel_context, f"❌ Cannot create directory: {str(e)}"
+                        channel_context, error_msg
                     )
                     return
 
@@ -264,8 +285,9 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
         except Exception as e:
             logger.error(f"Error setting cwd: {e}")
             channel_context = self._get_channel_context(context)
+            error_msg = handle_error(e, self.im_client.formatter, "Setting working directory")
             await self.im_client.send_message(
-                channel_context, f"❌ Error setting working directory: {str(e)}"
+                channel_context, error_msg
             )
 
     async def handle_change_cwd_modal(self, context: MessageContext):
@@ -297,9 +319,12 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
             except Exception as e:
                 logger.error(f"Error opening change CWD modal: {e}")
                 channel_context = self._get_channel_context(context)
+                error_msg = format_user_error(
+                    "Failed to open directory change dialog. Please try again.",
+                    self.im_client.formatter
+                )
                 await self.im_client.send_message(
-                    channel_context,
-                    "❌ Failed to open directory change dialog. Please try again.",
+                    channel_context, error_msg
                 )
         else:
             # No trigger_id, show instructions
@@ -341,9 +366,10 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
         except Exception as e:
             logger.error(f"Error sending stop command: {e}", exc_info=True)
             # For errors, still use original context to maintain thread consistency
+            error_msg = format_user_error(str(e), self.im_client.formatter)
             await self.im_client.send_message(
                 context,  # Use original context
-                f"❌ Error sending stop command: {str(e)}",
+                error_msg,
             )
 
     async def handle_agent(self, context: MessageContext, args: str = ""):
@@ -373,13 +399,13 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
             if args not in available_agents:
                 formatter = self.im_client.formatter
                 channel_context = self._get_channel_context(context)
+                error_msg = format_user_error(
+                    f"Unknown agent: {args}",
+                    formatter
+                )
                 await self.im_client.send_message(
                     channel_context,
-                    formatter.format_message(
-                        f"❌ Unknown agent: {formatter.format_code_inline(args)}",
-                        "",
-                        f"Available: {formatter.format_code_inline(', '.join(available_agents))}",
-                    ),
+                    error_msg
                 )
                 return
 
@@ -419,9 +445,10 @@ Use the buttons below to manage your {agent_display_name} sessions, or simply ty
         except Exception as e:
             logger.error(f"Error handling agent command: {e}", exc_info=True)
             channel_context = self._get_channel_context(context)
+            error_msg = handle_error(e, self.im_client.formatter, "Switching agent")
             await self.im_client.send_message(
                 channel_context,
-                f"❌ Error switching agent: {str(e)}",
+                error_msg
             )
 
     def _get_current_agent(self, context: MessageContext) -> str:

@@ -63,8 +63,15 @@ class MessageHandler:
                 except Exception as cleanup_err:
                     logger.debug(f"Safe cleanup skipped due to error: {cleanup_err}")
 
+            stripped = message.strip()
+
+            # Handle @@ shortcut to switch to project root
+            if stripped == "@@":
+                await self.controller.file_commands.handle_at_at(context)
+                return
+
             # Allow "stop" shortcut inside Slack threads
-            if context.thread_id and message.strip().lower() in ["stop", "/stop"]:
+            if context.thread_id and stripped.lower() in ["stop", "/stop"]:
                 if await self._handle_inline_stop(context):
                     return
 
@@ -117,12 +124,10 @@ class MessageHandler:
                 f"handle_callback_query called with data: {callback_data} for user {context.user_id}"
             )
 
-            # Import handlers to avoid circular dependency
-            from .settings_handler import SettingsHandler
-            from .command_handlers import CommandHandlers
-
-            settings_handler = SettingsHandler(self.controller)
-            command_handlers = CommandHandlers(self.controller)
+            # Use existing handler instances from controller
+            settings_handler = self.controller.settings_handler
+            command_handlers = self.controller.command_handler
+            system_commands = self.controller.system_commands
 
             # Route based on callback data
             if callback_data.startswith("toggle_msg_"):
@@ -152,6 +157,12 @@ class MessageHandler:
 
             elif callback_data == "cmd_clear":
                 await command_handlers.handle_clear(context)
+
+            elif callback_data == "cmd_status":
+                await system_commands.handle_status(context)
+
+            elif callback_data == "cmd_history":
+                await system_commands.handle_history(context)
 
             elif callback_data == "cmd_settings":
                 await settings_handler.handle_settings(context)

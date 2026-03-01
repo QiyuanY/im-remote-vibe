@@ -2,11 +2,14 @@
 import sys
 import logging
 import asyncio
+import os
 from dotenv import load_dotenv
 from config.settings import AppConfig
 from core.controller import Controller
 
-load_dotenv()
+# Load .env from project directory (explicit path to avoid frame detection issues)
+_project_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_project_dir, '.env'))
 
 
 def setup_logging(level: str = "INFO"):

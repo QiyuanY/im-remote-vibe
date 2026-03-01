@@ -14,7 +14,9 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     PLATFORM=$(cd "$SCRIPT_DIR" && python3 - <<'PY' 2>/dev/null || true
 from dotenv import load_dotenv
 import os
-load_dotenv()
+# Use explicit path to avoid frame detection issues in Python 3.13
+_project_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_project_dir, '.env'))
 print(os.getenv("IM_PLATFORM", ""))
 PY
 )

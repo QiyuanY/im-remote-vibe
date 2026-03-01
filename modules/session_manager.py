@@ -27,8 +27,8 @@ class UserSession:
     
     async def cleanup_clients(self):
         """Cleanup all Claude SDK clients and receiver tasks"""
-        # Cancel all receiver tasks first
-        for session_id, task in self.receiver_tasks.items():
+        # Cancel all receiver tasks first (create list copy to avoid runtime error during iteration)
+        for session_id, task in list(self.receiver_tasks.items()):
             if not task.done():
                 task.cancel()
                 try:
@@ -37,8 +37,8 @@ class UserSession:
                     pass
                 logger.info(f"Cancelled receiver task for session {session_id}")
         
-        # Then disconnect clients
-        for session_id, client in self.claude_clients.items():
+        # Then disconnect clients (create list copy to avoid runtime error during iteration)
+        for session_id, client in list(self.claude_clients.items()):
             try:
                 await client.disconnect()
                 logger.info(f"Disconnected Claude client for session {session_id}")

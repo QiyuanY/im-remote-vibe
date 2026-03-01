@@ -17,6 +17,10 @@ from core.handlers import (
     SessionHandler,
     SettingsHandler,
     MessageHandler,
+    FileCommands,
+    SystemCommands,
+    IntelligentErrorHandler,
+    VizCommands,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,7 +112,17 @@ class Controller:
         """Initialize all handlers with controller reference"""
         # Initialize session_handler first as other handlers depend on it
         self.session_handler = SessionHandler(self)
+
+        # Initialize error handler (used by other handlers)
+        self.error_handler = IntelligentErrorHandler()
+
+        # Initialize command handlers
         self.command_handler = CommandHandlers(self)
+        self.file_commands = FileCommands(self)
+        self.system_commands = SystemCommands(self)
+        self.viz_commands = VizCommands(self)
+
+        # Initialize other handlers
         self.settings_handler = SettingsHandler(self)
         self.message_handler = MessageHandler(self)
 
@@ -133,8 +147,9 @@ class Controller:
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
-        # Create command handlers dict
+        # Create command handlers dict - handlers from different handler classes
         command_handlers = {
+            # Basic commands from CommandHandlers
             "start": self.command_handler.handle_start,
             "clear": self.command_handler.handle_clear,
             "cwd": self.command_handler.handle_cwd,
@@ -142,6 +157,15 @@ class Controller:
             "settings": self.settings_handler.handle_settings,
             "stop": self.command_handler.handle_stop,
             "agent": self.command_handler.handle_agent,
+            # System commands from SystemCommands
+            "status": self.system_commands.handle_status,
+            "history": self.system_commands.handle_history,
+            # File commands from FileCommands
+            "run": self.file_commands.handle_run,
+            "ls": self.file_commands.handle_ls,
+            "@@": self.file_commands.handle_at_at,
+            # Visualization commands from VizCommands
+            "viz": self.viz_commands.handle_viz,
         }
 
         # Register callbacks with the IM client

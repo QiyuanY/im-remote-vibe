@@ -95,8 +95,11 @@ fi
 # Validate configuration
 echo "Validating configuration..."
 python3 - <<'PY'
+import os
 from dotenv import load_dotenv
-load_dotenv()
+# Use explicit path to avoid frame detection issues in Python 3.13
+_project_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_project_dir, '.env'))
 from config.settings import AppConfig
 AppConfig.from_env()
 print("Config OK")
