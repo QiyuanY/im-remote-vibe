@@ -229,9 +229,6 @@ class DingtalkConfig(BaseIMConfig):
         """Validate DingTalk configuration"""
         self.validate_required_string(self.app_key, "DINGTALK_APP_KEY")
         self.validate_required_string(self.app_secret, "DINGTALK_APP_SECRET")
-        # DingTalk app_key is typically 64 characters
-        if len(self.app_key) != 64:
-            logger.warning("DingTalk app_key length might be invalid (expected 64 characters)")
         return True
 
 

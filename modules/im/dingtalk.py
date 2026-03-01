@@ -10,21 +10,36 @@ Reference: https://open.dingtalk.com/document/development/introduction-to-stream
 import asyncio
 import json
 import logging
-import hmac
-import hashlib
 import time
 import threading
 from typing import Dict, Any, Optional, Callable, List
-from datetime import datetime
 
 from dingtalk_stream import DingTalkStreamClient, Credential, ChatbotHandler, ChatbotMessage, CallbackMessage
-from dingtalk_stream.card_replier import CardReplier
 
 from .base import BaseIMClient, MessageContext, InlineKeyboard, InlineButton
 from config.settings import DingtalkConfig
 from .formatters import DingtalkFormatter
 
 logger = logging.getLogger(__name__)
+
+# DingTalk markdown message length limit (conservative to avoid truncation)
+_DINGTALK_MARKDOWN_MAX_LEN = 9000
+
+
+def _chunk_text(text: str, max_len: int = _DINGTALK_MARKDOWN_MAX_LEN) -> List[str]:
+    """Split long text into chunks that fit within DingTalk's limits."""
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    while text:
+        chunk = text[:max_len]
+        # Try to break at a newline to avoid splitting mid-line
+        last_nl = chunk.rfind("\n", max_len // 2)
+        if last_nl > 0:
+            chunk = text[:last_nl]
+        chunks.append(chunk)
+        text = text[len(chunk):]
+    return chunks
 
 
 class ChatbotMessageHandler(ChatbotHandler):
@@ -36,7 +51,6 @@ class ChatbotMessageHandler(ChatbotHandler):
         # Shared event loop for Claude's long-running receiver tasks
         self._loop = None
         self._loop_thread = None
-        self._pending_tasks = []
 
     def _get_or_create_loop(self):
         """Get or create the shared event loop for async operations."""
@@ -46,7 +60,6 @@ class ChatbotMessageHandler(ChatbotHandler):
         if self._loop_thread and self._loop_thread.is_alive():
             return self._loop
 
-        # Create new event loop in a dedicated thread
         import queue
         result_queue = queue.Queue()
 
@@ -61,82 +74,90 @@ class ChatbotMessageHandler(ChatbotHandler):
         return result_queue.get(timeout=5)
 
     async def process(self, callback_message: CallbackMessage):
-        """Process incoming chatbot message
-
-        Args:
-            callback_message: CallbackMessage from dingtalk-stream SDK
-        """
-        # Run message processing in the shared event loop
+        """Process incoming chatbot message and ACK immediately."""
         loop = self._get_or_create_loop()
 
-        # Create a completion callback for logging/errors
         def task_done(fut):
             try:
                 fut.result()
             except Exception as e:
                 logger.error(f"Error in async task: {e}", exc_info=True)
 
-        # Submit the task to the shared loop
         future = asyncio.run_coroutine_threadsafe(
             self._process_message(callback_message), loop
         )
         future.add_done_callback(task_done)
-
-        # Return ACK immediately (don't wait for completion)
         return 200, "OK"
 
     async def _process_message(self, callback_message: CallbackMessage):
-        """Process message asynchronously
-
-        Args:
-            callback_message: CallbackMessage from dingtalk-stream SDK
-        """
+        """Process message asynchronously."""
         try:
-            # Convert CallbackMessage to ChatbotMessage
             chatbot_message = ChatbotMessage.from_dict(callback_message.data)
 
-            # Get message content
             text_content = chatbot_message.get_text_list()
             content = "\n".join(text_content) if text_content else ""
 
-            # Get message metadata from ChatbotMessage attributes
             conversation_id = chatbot_message.conversation_id or ""
             sender_id = chatbot_message.sender_id or ""
+            sender_staff_id = chatbot_message.sender_staff_id or ""
             msg_id = chatbot_message.message_id or ""
             session_webhook = chatbot_message.session_webhook or ""
+            session_webhook_expired_time = chatbot_message.session_webhook_expired_time or 0
+            conversation_type = chatbot_message.conversation_type or "1"
+            robot_code = chatbot_message.robot_code or self.bot.config.app_key
+            is_in_at_list = chatbot_message.is_in_at_list or False
 
-            logger.info(f"Received DingTalk message from {sender_id} in {conversation_id}: {content[:50]}...")
+            logger.info(
+                f"Received DingTalk message from {sender_id} in {conversation_id} "
+                f"(type={conversation_type}): {content[:50]}..."
+            )
 
-            # Check if message is authorized
             if not self.bot._is_conversation_allowed(conversation_id):
-                logger.info(f"Conversation {conversation_id} is not in target list, ignoring")
+                logger.info(f"Conversation {conversation_id} not in target list, ignoring")
                 return
 
-            # Create message context
+            # require_mention: for group chats, only respond when @mentioned
+            if self.bot.config.require_mention and conversation_type == "2":
+                if not is_in_at_list:
+                    logger.debug(
+                        f"require_mention=True but bot not in at_list for group {conversation_id}, ignoring"
+                    )
+                    return
+
+            # Strip @mention text so Claude doesn't see it
+            if is_in_at_list and content:
+                import re
+                content = re.sub(r"@\S+\s*", "", content).strip()
+
             context = MessageContext(
                 user_id=sender_id,
                 channel_id=conversation_id,
                 message_id=msg_id,
-                platform_specific={}
+                platform_specific={
+                    "session_webhook": session_webhook,
+                    "session_webhook_expired_time": session_webhook_expired_time,
+                    "conversation_type": conversation_type,
+                    "sender_staff_id": sender_staff_id,
+                    "robot_code": robot_code,
+                },
             )
 
-            # Store session_webhook for reply
+            # Update bot-level webhook cache as fallback
             if session_webhook:
-                self.bot.session_webhook = session_webhook
-                context.platform_specific["session_webhook"] = session_webhook
+                self.bot._update_conversation_webhook(
+                    conversation_id, session_webhook, session_webhook_expired_time,
+                    conversation_type, sender_staff_id, robot_code
+                )
 
-            # Check for commands (start with /)
             if content.strip().startswith("/"):
                 parts = content.strip().split(maxsplit=1)
                 command = parts[0].lstrip("/")
                 args = parts[1] if len(parts) > 1 else ""
-
                 handler = self.bot.on_command_callbacks.get(command)
                 if handler:
                     await handler(context, args)
                     return
 
-            # Handle as regular message
             if self.bot.on_message_callback:
                 await self.bot.on_message_callback(context, content)
 
@@ -151,445 +172,402 @@ class DingtalkBot(BaseIMClient):
         super().__init__(config)
         self.config = config
         self.stream_client: Optional[DingTalkStreamClient] = None
-        self.access_token: Optional[str] = None
-        self.token_expires_at: float = 0
+        self._access_token: Optional[str] = None
+        self._token_expires_at: float = 0
 
-        # Initialize DingTalk formatter
         self.formatter = DingtalkFormatter()
-
-        # Store message handlers
         self.command_handlers: Dict[str, Callable] = {}
-
-        # Session webhook for replying to messages
-        self.session_webhook: Optional[str] = None
-
-        # Settings manager for user settings
         self.settings_manager = None
-
-        # Active stream connection
         self._running = False
-        self._stream_task: Optional[asyncio.Task] = None
 
-        # Message handler
+        # Per-conversation webhook cache:
+        # { conversation_id: { webhook, expired_time, type, staff_id, robot_code } }
+        self._conversation_cache: Dict[str, Dict[str, Any]] = {}
+
         self.message_handler = ChatbotMessageHandler(self)
 
     def set_settings_manager(self, settings_manager):
-        """Set the settings manager for user settings"""
         self.settings_manager = settings_manager
 
     def get_default_parse_mode(self) -> str:
-        """Get the default parse mode for DingTalk"""
         return "markdown"
 
     def should_use_thread_for_reply(self) -> bool:
-        """DingTalk doesn't use threads like Slack"""
         return False
+
+    # ------------------------------------------------------------------
+    # Conversation metadata cache
+    # ------------------------------------------------------------------
+
+    def _update_conversation_webhook(
+        self,
+        conversation_id: str,
+        webhook: str,
+        expired_time: int,
+        conversation_type: str,
+        sender_staff_id: str,
+        robot_code: str,
+    ):
+        """Cache the latest session_webhook and metadata for a conversation."""
+        self._conversation_cache[conversation_id] = {
+            "webhook": webhook,
+            "expired_time": expired_time,
+            "conversation_type": conversation_type,
+            "sender_staff_id": sender_staff_id,
+            "robot_code": robot_code,
+        }
+
+    def _get_valid_webhook(self, conversation_id: str) -> Optional[str]:
+        """Return the cached webhook URL if still valid (with 60s buffer)."""
+        entry = self._conversation_cache.get(conversation_id)
+        if not entry:
+            return None
+        expired_time = entry.get("expired_time", 0)
+        # expired_time is in milliseconds
+        if expired_time and time.time() * 1000 < expired_time - 60_000:
+            return entry.get("webhook")
+        return None
+
+    # ------------------------------------------------------------------
+    # Access token
+    # ------------------------------------------------------------------
 
     async def _get_access_token(self) -> str:
-        """Get access token from DingTalk API
+        """Get or refresh the DingTalk v1.0 access token."""
+        if self._access_token and time.time() < self._token_expires_at - 60:
+            return self._access_token
 
-        Returns:
-            Access token string
-        """
-        if self.access_token and time.time() < self.token_expires_at - 60:
-            return self.access_token
-
-        # DingTalk get access token API
         url = "https://api.dingtalk.com/v1.0/oauth2/accessToken"
-        timestamp = str(int(time.time() * 1000))
-
-        # Build signature
-        secret = self.config.app_secret.encode('utf-8')
-        string_to_sign = f"{timestamp}\n{self.config.app_secret}".encode('utf-8')
-        hmac_code = hmac.new(secret, string_to_sign, digestmod=hashlib.sha256).digest()
-        sign = hmac_code.hex()
-
-        params = {
+        body = {
             "appKey": self.config.app_key,
             "appSecret": self.config.app_secret,
-            "timestamp": timestamp,
-            "sign": sign
         }
 
         import aiohttp
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=params) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"Failed to get access token: {error_text}")
-                    raise RuntimeError(f"Failed to get access token: {response.status}")
+            async with session.post(url, json=body) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"Failed to get DingTalk access token: HTTP {resp.status} {error_text}")
+                    raise RuntimeError(f"Failed to get access token: HTTP {resp.status}")
 
-                data = await response.json()
-                # Check for error in response
-                if data.get("errcode", 0) != 0:
-                    logger.error(f"Failed to get access token: {data}")
-                    raise RuntimeError(f"Failed to get access token: {data}")
+                data = await resp.json()
+                token = data.get("accessToken")
+                if not token:
+                    raise RuntimeError(f"No accessToken in response: {data}")
 
-                self.access_token = data.get("accessToken")
-                if not self.access_token:
-                    logger.error(f"No access token in response: {data}")
-                    raise RuntimeError(f"No access token in response: {data}")
-                
-                # Update expiration time (default to 7200s if not provided)
                 expires_in = data.get("expireIn", 7200)
-                self.token_expires_at = time.time() + expires_in
-                
-                logger.info(f"Successfully obtained DingTalk access token, expires in {expires_in}s")
-                return self.access_token
+                self._access_token = token
+                self._token_expires_at = time.time() + expires_in
+                logger.info(f"DingTalk access token refreshed, expires in {expires_in}s")
+                return token
 
-    async def send_message(self, context: MessageContext, text: str,
-                          parse_mode: Optional[str] = None,
-                          reply_to: Optional[str] = None) -> str:
-        """Send a text message via DingTalk API
+    # ------------------------------------------------------------------
+    # Message sending
+    # ------------------------------------------------------------------
 
-        Args:
-            context: Message context (conversation_id, etc)
-            text: Message text
-            parse_mode: Optional formatting mode
-            reply_to: Optional message ID to reply to
+    async def send_message(
+        self,
+        context: MessageContext,
+        text: str,
+        parse_mode: Optional[str] = None,
+        reply_to: Optional[str] = None,
+    ) -> str:
+        """Send a text message.
 
-        Returns:
-            Message ID of sent message
+        Tries session_webhook first (fast & free), falls back to robot API.
+        Long messages are automatically chunked.
         """
-        # Use session_webhook if available (from received message)
-        webhook_url = context.platform_specific.get("session_webhook") if context.platform_specific else None
+        chunks = _chunk_text(text)
+        last_msg_id = ""
+        for chunk in chunks:
+            last_msg_id = await self._send_single(context, chunk)
+        return last_msg_id
 
-        if not webhook_url:
-            # Fallback to send via API
-            webhook_url = await self._get_conversation_webhook(context.channel_id)
+    async def _send_single(self, context: MessageContext, text: str) -> str:
+        """Send a single (already-sized) chunk."""
+        platform = context.platform_specific or {}
+        conversation_id = context.channel_id
 
-        return await self._send_via_webhook(webhook_url, text, parse_mode)
+        # 1. Try the webhook from current context
+        webhook = platform.get("session_webhook")
+        expired_time = platform.get("session_webhook_expired_time", 0)
+        if webhook and expired_time:
+            if time.time() * 1000 < expired_time - 60_000:
+                return await self._send_via_webhook(webhook, text)
+            else:
+                logger.debug("Context session_webhook expired, checking cache")
 
-    async def _get_conversation_webhook(self, conversation_id: str) -> str:
-        """Get webhook URL for a conversation
+        # 2. Try cached webhook for this conversation
+        cached_webhook = self._get_valid_webhook(conversation_id)
+        if cached_webhook:
+            return await self._send_via_webhook(cached_webhook, text)
 
-        Args:
-            conversation_id: DingTalk conversation ID
+        # 3. Fall back to robot API
+        conversation_type = platform.get("conversation_type") or self._get_cached_field(
+            conversation_id, "conversation_type", "1"
+        )
+        if conversation_type == "2":
+            return await self._send_to_group(conversation_id, text, platform)
+        else:
+            return await self._send_to_user(conversation_id, text, platform)
 
-        Returns:
-            Webhook URL for the conversation
-        """
-        access_token = await self._get_access_token()
+    def _get_cached_field(self, conversation_id: str, field: str, default: Any = None) -> Any:
+        entry = self._conversation_cache.get(conversation_id, {})
+        return entry.get(field, default)
 
-        # Get conversation webhook API
-        url = f"https://api.dingtalk.com/v1.0/robot/conversation/sendMessages"
-        headers = {
-            "x-acs-dingtalk-access-token": access_token
-        }
-        params = {
-            "conversationId": conversation_id,
-            "msgKey": ""
-        }
-
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"Failed to get conversation webhook: {error_text}")
-                    raise RuntimeError(f"Failed to get conversation webhook: {response.status}")
-
-                data = await response.json()
-                # Extract webhook URL from response
-                webhook_url = data.get("webhook", "")
-                if not webhook_url:
-                    logger.warning(f"No webhook in response: {data}")
-                    raise RuntimeError("No webhook URL available for conversation")
-
-                return webhook_url
-
-    async def _send_via_webhook(self, webhook_url: str, text: str,
-                              parse_mode: Optional[str] = None) -> str:
-        """Send message via DingTalk webhook
-
-        Args:
-            webhook_url: DingTalk webhook URL
-            text: Message text
-            parse_mode: Formatting mode
-
-        Returns:
-            Message ID of sent message
-        """
+    async def _send_via_webhook(self, webhook_url: str, text: str) -> str:
+        """Send markdown message via DingTalk session webhook."""
         import aiohttp
 
-        # Build message payload for DingTalk markdown
-        # DingTalk requires a title for markdown messages
-        title = "Vibe Remote"
-        # Try to extract a better title from the first line
-        lines = text.strip().split('\n')
-        if lines and lines[0].startswith('#'):
-            title = lines[0].lstrip('#').strip()
-            if len(title) > 20:
-                title = title[:20] + '...'
-
-        message_data = {
+        title = self._extract_title(text)
+        payload = {
             "msgtype": "markdown",
-            "markdown": {
-                "title": title,
-                "text": text
-            }
+            "markdown": {"title": title, "text": text},
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(webhook_url, json=message_data) as response:
-                result = await response.json()
-
-                if result.get("errcode") != 0:
-                    logger.error(f"Failed to send message via webhook: {result}")
-                    raise RuntimeError(f"Failed to send message: {result}")
-
-                # Return message ID from response
+            async with session.post(webhook_url, json=payload) as resp:
+                result = await resp.json()
+                if result.get("errcode") not in (0, None) or (
+                    resp.status != 200 and result.get("errcode") != 0
+                ):
+                    logger.error(f"Webhook send failed: {result}")
+                    raise RuntimeError(f"Webhook send failed: {result}")
                 return result.get("messageId", "")
 
-    async def send_message_with_buttons(self, context: MessageContext, text: str,
-                                      keyboard: InlineKeyboard,
-                                      parse_mode: Optional[str] = None) -> str:
-        """Send a message with inline buttons using ActionCard
+    async def _send_to_group(
+        self, conversation_id: str, text: str, platform: Dict[str, Any]
+    ) -> str:
+        """Send message to a group chat via robot API."""
+        access_token = await self._get_access_token()
+        robot_code = platform.get("robot_code") or self._get_cached_field(
+            conversation_id, "robot_code", self.config.app_key
+        )
+        title = self._extract_title(text)
+        msg_param = json.dumps({"title": title, "text": text}, ensure_ascii=False)
 
-        Args:
-            context: Message context
-            text: Message text
-            keyboard: Inline keyboard configuration
-            parse_mode: Optional formatting mode
+        url = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
+        headers = {"x-acs-dingtalk-access-token": access_token}
+        body = {
+            "robotCode": robot_code,
+            "openConversationId": conversation_id,
+            "msgKey": "sampleMarkdown",
+            "msgParam": msg_param,
+        }
 
-        Returns:
-            Message ID of sent message
-        """
-        webhook_url = context.platform_specific.get("session_webhook") if context.platform_specific else None
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=body) as resp:
+                if resp.status != 200:
+                    err = await resp.text()
+                    logger.error(f"Failed to send group message: HTTP {resp.status} {err}")
+                    raise RuntimeError(f"Group message failed: HTTP {resp.status}")
+                result = await resp.json()
+                return result.get("processQueryKey", "")
 
-        if not webhook_url:
-            webhook_url = await self._get_conversation_webhook(context.channel_id)
-
-        # Convert InlineKeyboard to DingTalk ActionCard button format
-        btn_orientation = "1"  # 1 = horizontal
-        btn_json = []
-
-        for row in keyboard.buttons:
-            for button in row:
-                btn_json.append({
-                    "title": button.text,
-                    "actionURL": button.callback_data
-                })
-
-        # Build ActionCard message
-        # DingTalk requires a title for ActionCard messages
-        title = "Vibe Remote"
-        # Try to extract a better title from the first line
-        lines = text.strip().split('\n')
-        if lines and lines[0].startswith('#'):
-            title = lines[0].lstrip('#').strip()
-            if len(title) > 20:
-                title = title[:20] + '...'
-
-        card = self.formatter.format_action_card(
-            title=title,
-            text=text,
-            btn_orientation=btn_orientation
+    async def _send_to_user(
+        self, conversation_id: str, text: str, platform: Dict[str, Any]
+    ) -> str:
+        """Send 1-on-1 message via robot API using staffId."""
+        access_token = await self._get_access_token()
+        robot_code = platform.get("robot_code") or self._get_cached_field(
+            conversation_id, "robot_code", self.config.app_key
+        )
+        staff_id = platform.get("sender_staff_id") or self._get_cached_field(
+            conversation_id, "sender_staff_id"
         )
 
-        if btn_json:
-            # Add first button for now (DingTalk ActionCard typically has single button)
-            if btn_json:
-                card["actionCard"]["btnOrientation"] = "0"
-                card["actionCard"]["btns"] = btn_json
+        if not staff_id:
+            logger.warning(
+                f"No sender_staff_id for conversation {conversation_id}; cannot send via robot API"
+            )
+            raise RuntimeError("Cannot send message: no sender staff ID available")
+
+        title = self._extract_title(text)
+        msg_param = json.dumps({"title": title, "text": text}, ensure_ascii=False)
+
+        url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+        headers = {"x-acs-dingtalk-access-token": access_token}
+        body = {
+            "robotCode": robot_code,
+            "userIds": [staff_id],
+            "msgKey": "sampleMarkdown",
+            "msgParam": msg_param,
+        }
 
         import aiohttp
         async with aiohttp.ClientSession() as session:
-            async with session.post(webhook_url, json=card) as response:
-                result = await response.json()
+            async with session.post(url, headers=headers, json=body) as resp:
+                if resp.status != 200:
+                    err = await resp.text()
+                    logger.error(f"Failed to send 1-on-1 message: HTTP {resp.status} {err}")
+                    raise RuntimeError(f"1-on-1 message failed: HTTP {resp.status}")
+                result = await resp.json()
+                return result.get("processQueryKey", "")
 
-                if result.get("errcode") != 0:
-                    logger.error(f"Failed to send ActionCard message: {result}")
-                    raise RuntimeError(f"Failed to send message with buttons: {result}")
+    @staticmethod
+    def _extract_title(text: str) -> str:
+        """Extract a short title from message text for DingTalk markdown cards."""
+        lines = text.strip().split("\n")
+        for line in lines:
+            stripped = line.lstrip("#").strip()
+            if stripped:
+                return stripped[:40] + ("..." if len(stripped) > 40 else "")
+        return "Vibe Remote"
 
-                return result.get("messageId", "")
+    # ------------------------------------------------------------------
+    # Message with buttons (ActionCard)
+    # ------------------------------------------------------------------
 
-    async def edit_message(self, context: MessageContext, message_id: str,
-                          text: Optional[str] = None,
-                          keyboard: Optional[InlineKeyboard] = None) -> bool:
-        """Edit an existing message
+    async def send_message_with_buttons(
+        self,
+        context: MessageContext,
+        text: str,
+        keyboard: InlineKeyboard,
+        parse_mode: Optional[str] = None,
+    ) -> str:
+        """Send ActionCard with buttons via webhook or robot API."""
+        platform = context.platform_specific or {}
+        conversation_id = context.channel_id
 
-        Note: DingTalk doesn't natively support editing sent messages.
-        This is a no-op that returns False.
+        webhook = platform.get("session_webhook")
+        expired_time = platform.get("session_webhook_expired_time", 0)
+        if webhook and expired_time and time.time() * 1000 >= expired_time - 60_000:
+            webhook = None
+        if not webhook:
+            webhook = self._get_valid_webhook(conversation_id)
 
-        Args:
-            context: Message context
-            message_id: ID of message to edit
-            text: New text (if provided)
-            keyboard: New keyboard (if provided)
+        title = self._extract_title(text)
+        btns = []
+        for row in keyboard.buttons:
+            for btn in row:
+                # Buttons use deep-link URLs; callback_data becomes the action identifier
+                btns.append({"title": btn.text, "actionURL": f"dingtalk://dingtalkclient/action?type=bot_msg&text={btn.callback_data}"})
 
-        Returns:
-            False (not supported)
-        """
-        logger.warning("DingTalk doesn't support editing messages")
+        card = {
+            "msgtype": "actionCard",
+            "actionCard": {
+                "title": title,
+                "text": text,
+                "btnOrientation": "0",
+                "btns": btns,
+            },
+        }
+
+        import aiohttp
+        if webhook:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(webhook, json=card) as resp:
+                    result = await resp.json()
+                    if result.get("errcode") not in (0, None):
+                        logger.error(f"ActionCard send failed: {result}")
+                        raise RuntimeError(f"ActionCard send failed: {result}")
+                    return result.get("messageId", "")
+
+        # Fallback: send plain markdown without buttons
+        logger.warning("No valid webhook for ActionCard; falling back to plain markdown")
+        return await self.send_message(context, text, parse_mode)
+
+    # ------------------------------------------------------------------
+    # Edit / Delete (limited DingTalk support)
+    # ------------------------------------------------------------------
+
+    async def edit_message(
+        self,
+        context: MessageContext,
+        message_id: str,
+        text: Optional[str] = None,
+        keyboard: Optional[InlineKeyboard] = None,
+    ) -> bool:
+        logger.debug("DingTalk does not support editing messages; skipping")
         return False
 
-    async def answer_callback(self, callback_id: str, text: Optional[str] = None,
-                            show_alert: bool = False) -> bool:
-        """Answer a callback query from inline button
-
-        Args:
-            callback_id: Callback query ID
-            text: Optional notification text
-            show_alert: Show as alert popup
-
-        Returns:
-            Success status
-        """
-        # DingTalk callbacks are handled via event subscriptions
-        # Return True to indicate callback was processed
+    async def answer_callback(
+        self, callback_id: str, text: Optional[str] = None, show_alert: bool = False
+    ) -> bool:
         return True
 
     async def delete_message(self, channel_id: str, message_id: str) -> bool:
-        """Delete a message (Not fully supported on DingTalk)
-
-        Args:
-            channel_id: Channel ID
-            message_id: Message ID to delete
-
-        Returns:
-            True (to prevent errors in controller)
-        """
-        # DingTalk doesn't support deleting messages via robot API easily
-        # We return True to prevent errors in the controller where _delete_ack is called
         logger.debug(f"delete_message called for {message_id}, not supported on DingTalk")
         return True
 
+    # ------------------------------------------------------------------
+    # User / channel info
+    # ------------------------------------------------------------------
+
+    async def get_user_info(self, user_id: str) -> Dict[str, Any]:
+        try:
+            access_token = await self._get_access_token()
+        except Exception as e:
+            return {"error": str(e)}
+
+        url = f"https://api.dingtalk.com/v1.0/contact/users/{user_id}"
+        headers = {"x-acs-dingtalk-access-token": access_token}
+
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                return await resp.json()
+
+    async def get_channel_info(self, channel_id: str) -> Dict[str, Any]:
+        """Return basic info from cache; DingTalk doesn't have a simple channel info API."""
+        cached = self._conversation_cache.get(channel_id, {})
+        return {
+            "id": channel_id,
+            "conversation_type": cached.get("conversation_type", "unknown"),
+        }
+
+    # ------------------------------------------------------------------
+    # Markdown formatting
+    # ------------------------------------------------------------------
+
+    def format_markdown(self, text: str) -> str:
+        return self.formatter.format_text(text)
+
+    # ------------------------------------------------------------------
+    # Allow-list check
+    # ------------------------------------------------------------------
+
+    def _is_conversation_allowed(self, conversation_id: str) -> bool:
+        target = self.config.target_conversation
+        if target is None:
+            return True
+        if isinstance(target, list):
+            if len(target) == 0:
+                return True
+            return conversation_id in target
+        return conversation_id == target
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     def register_handlers(self):
-        """Register platform-specific message and command handlers"""
-        # DingTalk uses stream mode handlers
         pass
 
     def run(self):
-        """Start the DingTalk bot using Stream mode"""
         logger.info("Starting DingTalk bot in Stream mode...")
-
-        # Create credential
         credential = Credential(self.config.app_key, self.config.app_secret)
-
-        # Create stream client
         self.stream_client = DingTalkStreamClient(credential)
-
-        # Register chatbot message handler
-        self.stream_client.register_callback_handler(ChatbotMessage.TOPIC, self.message_handler)
-
-        # Run the stream client (blocking call)
+        self.stream_client.register_callback_handler(
+            ChatbotMessage.TOPIC, self.message_handler
+        )
         self._running = True
         try:
             self.stream_client.start_forever()
         except KeyboardInterrupt:
-            logger.info("Received keyboard interrupt")
+            logger.info("DingTalk bot received keyboard interrupt")
         except Exception as e:
             logger.error(f"DingTalk stream error: {e}", exc_info=True)
         finally:
             self._running = False
 
-    def _is_conversation_allowed(self, conversation_id: str) -> bool:
-        """Check if conversation is allowed based on target_conversation config
-
-        Args:
-            conversation_id: DingTalk conversation ID
-
-        Returns:
-            True if conversation is allowed
-        """
-        target = self.config.target_conversation
-
-        # None means accept all
-        if target is None:
-            return True
-
-        # Empty list means reject all
-        if isinstance(target, list) and len(target) == 0:
-            return True
-
-        # Check if conversation_id is in the target list
-        if isinstance(target, list):
-            return conversation_id in target
-
-        # Single string target
-        return conversation_id == target
-
-    async def get_user_info(self, user_id: str) -> Dict[str, Any]:
-        """Get information about a user
-
-        Args:
-            user_id: DingTalk user ID (union_id)
-
-        Returns:
-            User information dict
-        """
-        access_token = await self._get_access_token()
-
-        url = f"https://api.dingtalk.com/v1.0/contact/users/{user_id}"
-        headers = {
-            "x-acs-dingtalk-access-token": access_token
-        }
-
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status != 200:
-                    return {"error": f"HTTP {response.status}"}
-
-                data = await response.json()
-                if data.get("errcode") != 0:
-                    return {"error": data.get("errmsg", "Unknown error")}
-
-                return data.get("result", {})
-
-    async def get_channel_info(self, channel_id: str) -> Dict[str, Any]:
-        """Get information about a conversation
-
-        Args:
-            channel_id: DingTalk conversation ID
-
-        Returns:
-            Conversation information dict
-        """
-        access_token = await self._get_access_token()
-
-        url = f"https://api.dingtalk.com/v1.0/robot/conversation/getConversationInfo"
-        headers = {
-            "x-acs-dingtalk-access-token": access_token
-        }
-        params = {
-            "conversationId": channel_id
-        }
-
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as response:
-                if response.status != 200:
-                    return {"error": f"HTTP {response.status}"}
-
-                data = await response.json()
-                if data.get("errcode") != 0:
-                    return {"error": data.get("errmsg", "Unknown error")}
-
-                return data.get("result", {})
-
-    def format_markdown(self, text: str) -> str:
-        """Format markdown text for DingTalk
-
-        Args:
-            text: Text with common markdown formatting
-
-        Returns:
-            DingTalk-specific formatted text
-        """
-        return self.formatter.format_text(text)
-
     def stop(self):
-        """Stop the DingTalk bot"""
         logger.info("Stopping DingTalk bot...")
         self._running = False
-        logger.info("DingTalk bot stopped")
 
     def is_running(self) -> bool:
-        """Check if the bot is running
-
-        Returns:
-            True if bot is running
-        """
         return self._running

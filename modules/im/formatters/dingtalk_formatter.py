@@ -43,7 +43,7 @@ class DingtalkFormatter(BaseMarkdownFormatter):
 
     def format_italic(self, text: str) -> str:
         """Format italic text in DingTalk markdown"""
-        return f"*text*"
+        return f"*{text}*"
 
     def format_strikethrough(self, text: str) -> str:
         """Format strikethrough text - DingTalk doesn't support this natively"""
