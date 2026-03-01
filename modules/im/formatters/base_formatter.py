@@ -270,10 +270,15 @@ class BaseMarkdownFormatter(ABC):
 
     def format_assistant_message(self, content_parts: List[str]) -> str:
         """Format assistant message"""
+        # Filter out empty parts
+        valid_parts = [p for p in content_parts if p and str(p).strip()]
+        if not valid_parts:
+            return ""
+            
         header = self.format_section_header("Assistant", "🤖")
         # Escape content parts that are plain text
         escaped_parts = []
-        for part in content_parts:
+        for part in valid_parts:
             # Only escape if it's plain text (not already formatted with tool info)
             if not part.startswith(
                 (
@@ -303,10 +308,15 @@ class BaseMarkdownFormatter(ABC):
 
     def format_user_message(self, content_parts: List[str]) -> str:
         """Format user/response message"""
+        # Filter out empty parts
+        valid_parts = [p for p in content_parts if p and str(p).strip()]
+        if not valid_parts:
+            return ""
+
         header = self.format_section_header("Response", "👤")
         # Escape content parts that are plain text
         escaped_parts = []
-        for part in content_parts:
+        for part in valid_parts:
             # Only escape if it's plain text (not already formatted)
             if not part.startswith(
                 (
